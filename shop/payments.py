@@ -18,6 +18,10 @@ class PaymentError(Exception):
     pass
 
 
+INVOICE_FIELDS = {"amount", "asset", "currency", "description", "expiredIn", "numPayments", "payload",
+                  "commentsEnabled", "minPayment"}
+
+
 class Payments:
     def __init__(self, config, store, bot, http):
         self.config = config
@@ -45,12 +49,24 @@ class Payments:
         try:
             async with self.http.request(method, f"{base}/{path}", headers=headers,
                                          allow_redirects=False, **kwargs) as response:
-                body = await response.json()
-                if not 200 <= response.status < 300 or body.get(flag) is not True or data not in body:
-                    raise PaymentError(f"{provider}: API не принял запрос ({response.status})")
+                status = response.status
+                try:
+                    body = await response.json()
+                except (ClientError, ValueError):
+                    raise PaymentError(f"{provider}: HTTP {status}, ответ API не в формате JSON") from None
+                if not 200 <= status < 300 or not isinstance(body, dict) or body.get(flag) is not True or data not in body:
+                    details = "API отклонил запрос"
+                    if status in (401, 403):
+                        details = "API отклонил ключ или запретил операцию"
+                    elif status == 400 and isinstance(body, dict) and isinstance(body.get("errors"), list):
+                        fields = sorted({item["property"] for item in body["errors"] if isinstance(item, dict)
+                                         and isinstance(item.get("property"), str) and item["property"] in INVOICE_FIELDS})
+                        if fields:
+                            details += f", проверьте поля {', '.join(fields)}"
+                    raise PaymentError(f"{provider}: HTTP {status}, {details}")
                 return body[data]
-        except (ClientError, TimeoutError, ValueError, AttributeError):
-            raise PaymentError(f"{provider}: ошибка ответа API") from None
+        except (ClientError, TimeoutError, ValueError) as error:
+            raise PaymentError(f"{provider}: ошибка соединения ({type(error).__name__})") from None
 
     async def create(self, user_id, provider, amount):
         if provider not in self.providers:
@@ -78,7 +94,7 @@ class Payments:
             url, external_id = invoice["link"], str(invoice["id"])
         parsed = urlsplit(url or "")
         if parsed.scheme != "https" or parsed.hostname != "t.me":
-            raise PaymentError("Платёжная система вернула неизвестную ссылку.")
+            raise PaymentError(f"{provider}: API вернул ссылку на счёт вне https://t.me")
         self.store.update("UPDATE deposits SET external_id = ?, url = ? WHERE id = ?", external_id, url, deposit_id)
         return url
 
@@ -136,7 +152,9 @@ class Payments:
                                   int(time.time()) + 30, deposit["id"])
                 try:
                     await self.check_crypto(deposit)
-                except (PaymentError, KeyError, TypeError, ValueError) as error:
+                except PaymentError as error:
+                    log.warning("Счёт %s не проверен. %s", deposit["id"], error)
+                except (KeyError, TypeError, ValueError) as error:
                     log.warning("Счёт %s не проверен (%s)", deposit["id"], type(error).__name__)
             await asyncio.sleep(3)
 

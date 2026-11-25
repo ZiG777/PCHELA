@@ -8,7 +8,7 @@ from aiogram.client.session.aiohttp import AiohttpSession
 from aiogram.types import FSInputFile, InputProfilePhotoStatic
 
 from .config import Config
-from .payments import Payments, deliver_notifications
+from .payments import XROCKET, PaymentError, Payments, deliver_notifications
 from .store import Store
 from .ui import LOGO, Shop
 
@@ -18,6 +18,30 @@ async def set_logo():
     async with Bot(config.token, session=AiohttpSession(timeout=20)) as bot:
         await bot.set_my_profile_photo(InputProfilePhotoStatic(photo=FSInputFile(LOGO)))
     print("Аватар PCHELA обновлён.")
+
+
+async def check_xrocket():
+    config = Config.load()
+    if not config.xrocket:
+        raise SystemExit("XROCKET_TOKEN не задан.")
+    async with ClientSession(timeout=ClientTimeout(total=6), trust_env=True) as http:
+        payments = Payments(config, None, None, http)
+        try:
+            await payments.request(XROCKET, "GET", "app/info")
+            print("xRocket: ключ принят.")
+            currencies = await payments.request(XROCKET, "GET", "currencies/available")
+        except PaymentError as error:
+            raise SystemExit(str(error)) from None
+    rows = currencies.get("results") if isinstance(currencies, dict) else None
+    if not isinstance(rows, list):
+        raise SystemExit("xRocket: неожиданный формат списка валют.")
+    usdt = next((row for row in rows if isinstance(row, dict) and row.get("currency") == "USDT"), None)
+    if not usdt:
+        raise SystemExit("xRocket: в списке доступных валют отсутствует код USDT.")
+    minimum = usdt.get("minInvoice")
+    if type(minimum) not in (int, float):
+        raise SystemExit("xRocket: API не вернул минимальную сумму счёта USDT.")
+    print(f"xRocket: минимальная сумма счёта {minimum} USDT.")
 
 
 async def main():
@@ -51,6 +75,13 @@ async def main():
 if __name__ == "__main__":
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s %(message)s")
     parser = argparse.ArgumentParser(description="Telegram-магазин PCHELA")
-    parser.add_argument("--set-logo", action="store_true", help="Установить логотип как аватар бота")
+    actions = parser.add_mutually_exclusive_group()
+    actions.add_argument("--set-logo", action="store_true", help="Установить логотип как аватар бота")
+    actions.add_argument("--check-xrocket", action="store_true", help="Проверить ключ xRocket и минимум счёта USDT")
     args = parser.parse_args()
-    asyncio.run(set_logo() if args.set_logo else main())
+    if args.set_logo:
+        asyncio.run(set_logo())
+    elif args.check_xrocket:
+        asyncio.run(check_xrocket())
+    else:
+        asyncio.run(main())

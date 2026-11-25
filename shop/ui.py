@@ -321,7 +321,10 @@ class Shop:
             await self.say(message, str(error))
         except sqlite3.IntegrityError:
             await self.say(message, "Не удалось сохранить запись. Проверьте, нет ли категории с таким названием.")
-        except (PaymentError, TelegramAPIError, KeyError, TypeError) as error:
+        except PaymentError as error:
+            log.error("Ошибка платежа. %s", error)
+            await self.say(message, f"Платёжная система сейчас не смогла обработать запрос.\n{self.config.support_url}")
+        except (TelegramAPIError, KeyError, TypeError) as error:
             log.error("Не удалось обработать действие %s (%s)", screen, type(error).__name__)
             await self.say(message, f"Действие временно недоступно.\n{self.config.support_url}")
 

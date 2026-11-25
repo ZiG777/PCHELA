@@ -262,6 +262,21 @@ class ShopTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(deposit["id"], kwargs["json"]["payload"])
             self.assertEqual(deposit["external_id"], "123")
 
+    async def test_xrocket_reports_validation_fields_without_leaking_response_text(self):
+        http = MagicMock()
+        response = http.request.return_value.__aenter__.return_value
+        response.status = 400
+        response.json = AsyncMock(return_value={
+            "success": False,
+            "message": "sensitive-text",
+            "errors": [{"property": "currency", "error": "sensitive-text"},
+                       {"property": "sensitive-text"}, {"property": []}],
+        })
+        payments = Payments(self.config, self.store, self.bot, http)
+        with self.assertRaises(PaymentError) as raised:
+            await payments.request(XROCKET, "POST", "tg-invoices")
+        self.assertEqual(str(raised.exception), "xRocket: HTTP 400, API отклонил запрос, проверьте поля currency")
+
     async def test_changed_price_requires_new_quote(self):
         self.store.register(2)
         self.store.update("UPDATE users SET balance = 100 WHERE id = 2")
