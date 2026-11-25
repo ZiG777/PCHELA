@@ -73,8 +73,9 @@ class Store:
         with self.write():
             if referrer == user_id or not self.one("SELECT id FROM users WHERE id = ?", referrer):
                 referrer = None
-            self.db.execute("INSERT OR IGNORE INTO users (id, referrer) VALUES (?, ?)", (user_id, referrer))
-        return self.one("SELECT * FROM users WHERE id = ?", user_id)
+            created = self.db.execute("INSERT OR IGNORE INTO users (id, referrer) VALUES (?, ?)",
+                                      (user_id, referrer)).rowcount == 1
+            return self.one("SELECT * FROM users WHERE id = ?", user_id), created
 
     def notify(self, recipients, message, parse_mode=None):
         self.db.executemany("INSERT INTO outbox (recipient, message, parse_mode) VALUES (?, ?, ?)",

@@ -3,6 +3,7 @@ import re
 import sqlite3
 from collections import Counter
 from html import escape
+from pathlib import Path
 from uuid import uuid4
 
 from aiogram import F, Router
@@ -10,11 +11,20 @@ from aiogram.enums import ChatType
 from aiogram.exceptions import TelegramAPIError
 from aiogram.filters import Command, CommandStart
 from aiogram.fsm.context import FSMContext
-from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup, KeyboardButton, LinkPreviewOptions, ReplyKeyboardMarkup
+from aiogram.types import (
+    FSInputFile, InlineKeyboardButton, InlineKeyboardMarkup, KeyboardButton, LinkPreviewOptions, ReplyKeyboardMarkup,
+)
 
 from .payments import CRYPTOBOT, STARS, XROCKET, PaymentError
 
 log = logging.getLogger(__name__)
+LOGO = Path(__file__).with_name("logo.jpg")
+WELCOME = (
+    "🐝 <b>Привет! Ты в PCHELA.</b>\n\n"
+    "Загляни в <b>Каталог</b>, чтобы выбрать товар. "
+    "В <b>Кабинете</b> можно пополнить баланс, посмотреть заказы и пригласить друзей.\n\n"
+    "Если нужна помощь, нажми <b>Поддержка</b>."
+)
 HOME = "Главное меню"
 ADMIN = "Админ-панель"
 CATALOG = "Каталог"
@@ -129,18 +139,27 @@ class Shop:
         rows = [*button_rows, *([name] for name in buttons), [HOME]]
         await self.say(message, text, rows, parse_mode=parse_mode)
 
-    async def home(self, message, state, text="Выберите раздел в нижнем меню."):
+    async def home(self, message, state, *, welcome=False):
         await state.clear()
         rows = [[CATALOG, BALANCE], [ORDERS, PROFILE], [SUPPORT]]
         if message.from_user.id in self.config.admins:
             rows.append([ADMIN])
-        await self.say(message, text, rows)
+        if welcome:
+            try:
+                await message.answer_photo(FSInputFile(LOGO), caption=WELCOME,
+                                           parse_mode="HTML", reply_markup=keyboard(rows))
+                return
+            except (OSError, TelegramAPIError) as error:
+                log.warning("Не удалось отправить логотип (%s)", type(error).__name__)
+            await self.say(message, WELCOME, rows, parse_mode="HTML")
+        else:
+            await self.say(message, "Выберите раздел в нижнем меню.", rows)
 
     async def start(self, message, state, command):
         args = command.args or ""
         referrer = int(args[4:]) if re.fullmatch(r"ref_[0-9]{1,18}", args) else None
-        self.store.register(message.from_user.id, referrer)
-        await self.home(message, state, "👋 Добро пожаловать в PCHELA!\n\nОткройте каталог или проверьте баланс в нижнем меню.")
+        _, created = self.store.register(message.from_user.id, referrer)
+        await self.home(message, state, welcome=created)
 
     async def support(self, message, state):
         self.store.register(message.from_user.id)
@@ -263,7 +282,7 @@ class Shop:
                                      [PENDING_ORDERS, WITHDRAWALS]], parse_mode="HTML")
 
     async def message(self, message, state):
-        user = self.store.register(message.from_user.id)
+        user, _ = self.store.register(message.from_user.id)
         text = message.text.strip()
         action = BUTTON_ACTIONS.get(text, text)
         data = await state.get_data()

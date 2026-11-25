@@ -1,14 +1,23 @@
+import argparse
 import asyncio
 import logging
 
 from aiohttp import ClientSession, ClientTimeout
 from aiogram import Bot, Dispatcher
 from aiogram.client.session.aiohttp import AiohttpSession
+from aiogram.types import FSInputFile, InputProfilePhotoStatic
 
 from .config import Config
 from .payments import Payments, deliver_notifications
 from .store import Store
-from .ui import Shop
+from .ui import LOGO, Shop
+
+
+async def set_logo():
+    config = Config.load()
+    async with Bot(config.token, session=AiohttpSession(timeout=20)) as bot:
+        await bot.set_my_profile_photo(InputProfilePhotoStatic(photo=FSInputFile(LOGO)))
+    print("Аватар PCHELA обновлён.")
 
 
 async def main():
@@ -41,4 +50,7 @@ async def main():
 
 if __name__ == "__main__":
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s %(message)s")
-    asyncio.run(main())
+    parser = argparse.ArgumentParser(description="Telegram-магазин PCHELA")
+    parser.add_argument("--set-logo", action="store_true", help="Установить логотип как аватар бота")
+    args = parser.parse_args()
+    asyncio.run(set_logo() if args.set_logo else main())

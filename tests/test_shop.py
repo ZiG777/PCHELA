@@ -4,13 +4,13 @@ from unittest.mock import AsyncMock, MagicMock
 
 from aiogram import Bot, Dispatcher
 from aiogram.client.session.base import BaseSession
-from aiogram.methods import AnswerPreCheckoutQuery, CreateInvoiceLink, SendMessage
+from aiogram.methods import AnswerPreCheckoutQuery, CreateInvoiceLink, SendMessage, SendPhoto
 from aiogram.types import InlineKeyboardMarkup, ReplyKeyboardMarkup, Update
 
 from shop.config import Config
 from shop.payments import CRYPTOBOT, STARS, XROCKET, PaymentError, Payments
 from shop.store import Store
-from shop.ui import Shop
+from shop.ui import LOGO, Shop
 
 
 class FakeTelegram(BaseSession):
@@ -242,12 +242,23 @@ class ShopTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.store.one("SELECT balance FROM users WHERE id = 2")["balance"], 100)
 
     async def test_admin_actions_are_inaccessible_to_customers(self):
-        for message in ("/start", "Админ-панель", "Добавить категорию", "Редактировать категорию",
+        for message in ("Админ-панель", "Добавить категорию", "Редактировать категорию",
                         "Фальшивая категория"):
             result = await self.chat(2, message)
             self.assertIsInstance(result, SendMessage)
             self.assertNotIn("🛠 Админ-панель", [button.text for row in result.reply_markup.keyboard for button in row])
         self.assertFalse(self.store.all("SELECT id FROM categories"))
+
+    async def test_new_user_gets_welcome_photo_and_main_keyboard_once(self):
+        first = await self.chat(2, "/start")
+        self.assertIsInstance(first, SendPhoto)
+        self.assertEqual(first.photo.path, LOGO)
+        self.assertTrue(LOGO.is_file())
+        self.assertIn("Привет! Ты в PCHELA.", first.caption)
+        self.assertEqual(first.reply_markup.keyboard[0][0].text, "🛍 Каталог")
+        again = await self.chat(2, "/start")
+        self.assertIsInstance(again, SendMessage)
+        self.assertIsInstance(again.reply_markup, ReplyKeyboardMarkup)
 
     async def test_rename_category_and_show_names_in_two_columns(self):
         for name in ("Игры", "Сервисы", "Подписки"):
