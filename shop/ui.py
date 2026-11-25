@@ -1,6 +1,7 @@
 import logging
 import re
 import sqlite3
+from collections import Counter
 from html import escape
 from uuid import uuid4
 
@@ -53,6 +54,7 @@ BUTTON_STYLES = {TOP_UP: "primary", BUY: "success", ISSUE: "success", APPROVE: "
 
 CATEGORY_QUERY = "SELECT id, name AS label FROM categories ORDER BY id"
 CATEGORY_LISTS = {"catalog", "new_product_category", "edit_category"}
+PRODUCT_LISTS = {"products", "edit_product"}
 CATEGORY_INPUTS = {"new_category", "rename_category"}
 
 LISTS = {
@@ -82,7 +84,7 @@ ADMIN_SCREENS = {
     "new_product_name", "new_product_description", "new_product_price",
     "edit_product", "edit_field", "edit_value", "pending_orders", "issue_order", "withdrawals", "resolve_withdrawal",
 }
-LIST_ICONS = {"Товар": "🛒", "Заказ": "📦", "Заявка": "📋"}
+LIST_ICONS = {"Заказ": "📦", "Заявка": "📋"}
 
 
 def keyboard(rows):
@@ -172,6 +174,8 @@ class Shop:
         if screen in CATEGORY_LISTS:
             columns = 2
             labels = {f"📁 {row['label']}": row["id"] for row in visible}
+        elif screen in PRODUCT_LISTS:
+            labels = self.product_labels(visible)
         else:
             labels = {
                 f"{LIST_ICONS[noun]} {noun} №{row['id']} · {' '.join(row['label'].split())[:44]}": row["id"]
@@ -188,6 +192,21 @@ class Shop:
         await self.show(message, state, screen, heading if labels else f"{heading}\n\nЗдесь пока пусто.",
                         navigation, button_rows=button_rows, parse_mode="HTML",
                         labels=labels, navigation=navigation, params=list(params))
+
+    @staticmethod
+    def product_labels(products):
+        names = [f"🛒 {' '.join(product['label'].split())[:44]}" for product in products]
+        counts = Counter(names)
+        labels = {}
+        for name, product in zip(names, products):
+            product_id = product["id"]
+            label = name
+            if counts[name] > 1:
+                label = f"{name} · {product_id}"
+                while label in counts or label in labels:
+                    label += " ·"
+            labels[label] = product_id
+        return labels
 
     def order_message(self, order, admin=False):
         status = "✅ Выдан" if order["status"] == "issued" else "⏳ Ожидает выдачи"

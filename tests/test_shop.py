@@ -75,13 +75,13 @@ class ShopTests(unittest.IsolatedAsyncioTestCase):
         await self.chat(8, "Описание товара")
         await self.chat(8, "50")
         await self.chat(8, "✏️ Редактировать товар")
-        await self.chat(8, "🛒 Товар №1 · Игры / Товар")
+        await self.chat(8, "🛒 Игры / Товар")
         await self.chat(8, "💰 Цена")
         await self.chat(8, "100")
 
         await self.chat(2, "🛍 Каталог")
         await self.chat(2, "📁 Игры")
-        await self.chat(2, "🛒 Товар №1 · Товар")
+        await self.chat(2, "🛒 Товар")
         await self.chat(2, "2")
         call = await self.chat(2, "🛒 Оплатить с баланса")
         self.assertIn("Недостаточно средств", call.text)
@@ -234,7 +234,7 @@ class ShopTests(unittest.IsolatedAsyncioTestCase):
         self.store.update("INSERT INTO products (category_id, name, description, price) VALUES (1, 'Товар', 'Текст', 10)")
         await self.chat(2, "🛍 Каталог")
         await self.chat(2, "📁 Игры")
-        await self.chat(2, "🛒 Товар №1 · Товар")
+        await self.chat(2, "🛒 Товар")
         await self.chat(2, "1")
         self.store.update("UPDATE products SET price = 50 WHERE id = 1")
         reply = await self.chat(2, "🛒 Оплатить с баланса")
@@ -266,4 +266,16 @@ class ShopTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual([[button.text for button in row] for row in catalog.reply_markup.keyboard],
                          [["📁 Аккаунты", "📁 Сервисы"], ["📁 Подписки"], ["🏠 Главное меню"]])
         products = await self.chat(2, "📁 Аккаунты")
-        self.assertEqual(products.reply_markup.keyboard[0][0].text, "🛒 Товар №1 · Товар")
+        self.assertEqual(products.reply_markup.keyboard[0][0].text, "🛒 Товар")
+
+    async def test_products_with_the_same_name_have_distinct_buttons(self):
+        self.store.update("INSERT INTO categories (name) VALUES ('Игры')")
+        self.store.update("INSERT INTO products (category_id, name, description, price) VALUES (1, 'Аккаунт', 'Первый', 10)")
+        self.store.update("INSERT INTO products (category_id, name, description, price) VALUES (1, 'Аккаунт', 'Второй', 20)")
+        await self.chat(2, "🛍 Каталог")
+        products = await self.chat(2, "📁 Игры")
+        first, second = [row[0].text for row in products.reply_markup.keyboard[:2]]
+        self.assertEqual(first, "🛒 Аккаунт · 1")
+        self.assertEqual(second, "🛒 Аккаунт · 2")
+        card = await self.chat(2, second)
+        self.assertIn("Второй", card.text)
