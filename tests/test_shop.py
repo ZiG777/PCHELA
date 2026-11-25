@@ -1,0 +1,218 @@
+import unittest
+from dataclasses import replace
+from unittest.mock import AsyncMock, MagicMock
+
+from aiogram import Bot, Dispatcher
+from aiogram.client.session.base import BaseSession
+from aiogram.methods import AnswerPreCheckoutQuery, CreateInvoiceLink, SendMessage
+from aiogram.types import ReplyKeyboardMarkup, Update
+
+from shop.config import Config
+from shop.payments import CRYPTOBOT, STARS, XROCKET, PaymentError, Payments
+from shop.store import Store
+from shop.ui import Shop
+
+
+class FakeTelegram(BaseSession):
+    def __init__(self):
+        super().__init__()
+        self.calls = []
+
+    async def close(self):
+        pass
+
+    async def make_request(self, bot, method, timeout=None):
+        self.calls.append(method)
+        if isinstance(method, CreateInvoiceLink):
+            return "https://t.me/$test-invoice"
+        return True
+
+    async def stream_content(self, *args, **kwargs):
+        raise NotImplementedError
+        yield
+
+
+class ShopTests(unittest.IsolatedAsyncioTestCase):
+    async def asyncSetUp(self):
+        self.config = Config("unused", (8,), "https://t.me/admin_user", "https://t.me/support_user",
+                             5, ":memory:", "XTR", "", "", False)
+        self.store = Store(":memory:", "XTR")
+        self.addCleanup(self.store.db.close)
+        self.telegram = FakeTelegram()
+        self.bot = Bot("123:test", session=self.telegram)
+        self.payments = Payments(self.config, self.store, self.bot, None)
+        self.dispatcher = Dispatcher()
+        self.dispatcher.include_router(Shop(self.config, self.store, self.payments, "test_shop_bot").router)
+        self.update_id = 0
+
+    async def feed(self, payload):
+        self.update_id += 1
+        await self.dispatcher.feed_update(self.bot, Update.model_validate({"update_id": self.update_id, **payload}))
+        return self.telegram.calls[-1]
+
+    @staticmethod
+    def telegram_user(user, username):
+        return {"id": user, "is_bot": False, "first_name": "User", "username": username}
+
+    async def chat(self, user, text=None, username=None, **fields):
+        message = {"message_id": self.update_id + 1, "date": 1, "chat": {"id": user, "type": "private"},
+                   "from": self.telegram_user(user, username), **fields}
+        if text is not None:
+            message["text"] = text
+        return await self.feed({"message": message})
+
+    async def test_catalog_purchase_issue_and_withdrawal(self):
+        await self.chat(1, "/start")
+        await self.chat(2, "/start ref_1")
+        await self.chat(2, "/start ref_8")
+        await self.chat(8, "/start")
+        await self.chat(8, "Админ-панель")
+        await self.chat(8, "Добавить категорию")
+        await self.chat(8, "Игры")
+        await self.chat(8, "Добавить товар")
+        await self.chat(8, "Категория №1 · Игры")
+        await self.chat(8, "Товар")
+        await self.chat(8, "Описание товара")
+        await self.chat(8, "50")
+        await self.chat(8, "Редактировать товар")
+        await self.chat(8, "Товар №1 · Игры / Товар")
+        await self.chat(8, "Цена")
+        await self.chat(8, "100")
+
+        await self.chat(2, "Каталог")
+        await self.chat(2, "Категория №1 · Игры")
+        await self.chat(2, "Товар №1 · Товар")
+        await self.chat(2, "2")
+        call = await self.chat(2, "Оплатить с баланса")
+        self.assertIn("Недостаточно средств", call.text)
+        self.assertFalse(self.store.all("SELECT id FROM orders"))
+        deposit = self.store.create_deposit(2, STARS, 200)
+        self.assertEqual(self.store.one("SELECT referral_balance FROM users WHERE id = 1")["referral_balance"], 0)
+        self.payments.credit(deposit, "test-credit")
+        referral = await self.chat(1, "Реферальная программа")
+        self.assertIn("Доступно к выводу 10 ⭐", referral.text)
+        receipt = await self.chat(2, "Оплатить с баланса")
+        self.assertIsInstance(receipt.reply_markup, ReplyKeyboardMarkup)
+        self.assertIn("Заказ №1", receipt.text)
+        self.assertIn(self.config.admin_url, receipt.text)
+        await self.chat(2, "Оплатить с баланса")
+        await self.chat(2, "Выдано")
+        order = self.store.one("SELECT * FROM orders")
+        self.assertEqual(order["status"], "pending")
+        self.assertEqual(order["total"], 200)
+        admin_notice = self.store.one("SELECT message FROM outbox WHERE recipient = 8")["message"]
+        self.assertIn("tg://user?id=2", admin_notice)
+        self.assertEqual(self.store.one("SELECT balance FROM users WHERE id = 2")["balance"], 0)
+        self.assertEqual(self.store.one("SELECT referral_balance FROM users WHERE id = 1")["referral_balance"], 10)
+
+        # A pending order from the old scheme may still have a reward recorded.
+        self.store.update("UPDATE orders SET reward = 10 WHERE id = 1")
+        await self.chat(8, "Заказы к выдаче")
+        await self.chat(8, "Заказ №1 · Товар")
+        await self.chat(8, "Выдано")
+        with self.assertRaises(ValueError):
+            self.store.complete_order(1)
+        self.assertEqual(self.store.one("SELECT referral_balance FROM users WHERE id = 1")["referral_balance"], 10)
+
+        await self.chat(1, "Реферальная программа")
+        await self.chat(1, "Запросить вывод")
+        await self.chat(1, "10")
+        await self.chat(1, "@recipient")
+        await self.chat(8, "Заявки на вывод")
+        await self.chat(8, "Заявка №1 · @recipient")
+        await self.chat(8, "Отклонить заявку")
+        self.assertEqual(self.store.one("SELECT referral_balance FROM users WHERE id = 1")["referral_balance"], 10)
+        self.assertEqual(self.store.one("SELECT status FROM withdrawals")["status"], "rejected")
+
+    async def test_stars_invoice_checks_owner_amount_and_duplicate_delivery(self):
+        await self.chat(1, "/start")
+        await self.chat(2, "/start ref_1")
+        await self.chat(2, "Баланс")
+        await self.chat(2, "Пополнить баланс")
+        await self.chat(2, STARS)
+        response = await self.chat(2, "110")
+        self.assertIn("https://t.me/$test-invoice", response.text)
+        invoice = next(call for call in self.telegram.calls if isinstance(call, CreateInvoiceLink))
+        fields = {"currency": "XTR", "total_amount": 110, "invoice_payload": invoice.payload}
+        for payer, query_id, amount, expected in (
+            (3, "wrong-owner", 110, False), (2, "wrong-amount", 10, False),
+            (2, "good", 110, True), (2, "duplicate", 110, False),
+        ):
+            answer = await self.feed({"pre_checkout_query": {
+                **fields, "id": query_id, "from": self.telegram_user(payer, None), "total_amount": amount,
+            }})
+            self.assertIsInstance(answer, AnswerPreCheckoutQuery)
+            self.assertEqual(answer.ok, expected)
+        self.assertEqual(self.store.one("SELECT referral_balance FROM users WHERE id = 1")["referral_balance"], 0)
+        payment = {**fields, "telegram_payment_charge_id": "charge", "provider_payment_charge_id": ""}
+        await self.chat(2, successful_payment=payment)
+        await self.chat(2, successful_payment=payment)
+        result = await self.chat(2, "Баланс")
+        self.assertEqual(result.text, "Баланс 110 ⭐")
+        self.assertEqual(self.store.one("SELECT referral_balance FROM users WHERE id = 1")["referral_balance"], 5)
+        self.assertEqual(self.store.one("SELECT count(*) AS total FROM outbox")["total"], 1)
+
+    async def test_wrong_crypto_invoice_amount_is_rejected_and_valid_invoice_credited_once(self):
+        self.store.register(1)
+        self.store.register(2, referrer=1)
+        for provider in (CRYPTOBOT, XROCKET):
+            deposit_id = self.store.create_deposit(2, provider, 123)
+            self.store.update("UPDATE deposits SET external_id = '1' WHERE id = ?", deposit_id)
+            deposit = self.store.one("SELECT * FROM deposits WHERE id = ?", deposit_id)
+            invoice = {"id": 1, "invoice_id": 1, "status": "paid", "amount": "2.23",
+                       "currency": "USDT", "asset": "USDT", "payload": deposit_id}
+            response = {"items": [invoice]} if provider == CRYPTOBOT else invoice
+            self.payments.request = AsyncMock(return_value=response)
+            with self.assertRaisesRegex(PaymentError, "параметры счёта не совпадают"):
+                await self.payments.check_crypto(deposit)
+            invoice["amount"] = "1.23"
+            await self.payments.check_crypto(deposit)
+            await self.payments.check_crypto(deposit)
+        self.assertEqual(self.store.one("SELECT balance FROM users WHERE id = 2")["balance"], 246)
+        self.assertEqual(self.store.one("SELECT referral_balance FROM users WHERE id = 1")["referral_balance"], 12)
+
+    async def test_create_crypto_invoices_preserves_provider_ids_and_amount(self):
+        store = Store(":memory:", "USDT")
+        self.addCleanup(store.db.close)
+        store.register(2)
+        config = replace(self.config, currency="USDT", cryptobot="test", xrocket="test")
+        http = MagicMock()
+        payments = Payments(config, store, self.bot, http)
+        link = "https://t.me/test_pay?start=invoice"
+        for provider, host, path, status, wrapper in (
+            (CRYPTOBOT, "pay.crypt.bot", "api/createInvoice", 200,
+             {"ok": True, "result": {"invoice_id": 123, "bot_invoice_url": link}}),
+            (XROCKET, "pay.xrocket.tg", "tg-invoices", 201,
+             {"success": True, "data": {"id": 123, "link": link}}),
+        ):
+            response = http.request.return_value.__aenter__.return_value
+            response.status = status
+            response.json = AsyncMock(return_value=wrapper)
+            self.assertEqual(await payments.create(2, provider, 123), link)
+            args, kwargs = http.request.call_args
+            self.assertEqual(args, ("POST", f"https://{host}/{path}"))
+            self.assertEqual(float(kwargs["json"]["amount"]), 1.23)
+            deposit = store.one("SELECT * FROM deposits WHERE provider = ?", provider)
+            self.assertEqual(deposit["id"], kwargs["json"]["payload"])
+            self.assertEqual(deposit["external_id"], "123")
+
+    async def test_changed_price_requires_new_quote(self):
+        self.store.register(2)
+        self.store.update("UPDATE users SET balance = 100 WHERE id = 2")
+        self.store.update("INSERT INTO categories (name) VALUES ('Игры')")
+        self.store.update("INSERT INTO products (category_id, name, description, price) VALUES (1, 'Товар', 'Текст', 10)")
+        await self.chat(2, "Каталог")
+        await self.chat(2, "Категория №1 · Игры")
+        await self.chat(2, "Товар №1 · Товар")
+        await self.chat(2, "1")
+        self.store.update("UPDATE products SET price = 50 WHERE id = 1")
+        reply = await self.chat(2, "Оплатить с баланса")
+        self.assertIn("Товар изменился", reply.text)
+        self.assertEqual(self.store.one("SELECT balance FROM users WHERE id = 2")["balance"], 100)
+
+    async def test_admin_actions_are_inaccessible_to_customers(self):
+        for message in ("/start", "Админ-панель", "Добавить категорию", "Фальшивая категория"):
+            result = await self.chat(2, message)
+            self.assertIsInstance(result, SendMessage)
+            self.assertNotIn("Админ-панель", [button.text for row in result.reply_markup.keyboard for button in row])
+        self.assertFalse(self.store.all("SELECT id FROM categories"))
