@@ -9,15 +9,16 @@ from aiogram.enums import ChatType
 from aiogram.exceptions import TelegramAPIError
 from aiogram.filters import Command, CommandStart
 from aiogram.fsm.context import FSMContext
-from aiogram.types import KeyboardButton, LinkPreviewOptions, ReplyKeyboardMarkup
+from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup, KeyboardButton, LinkPreviewOptions, ReplyKeyboardMarkup
 
-from .payments import PaymentError
+from .payments import CRYPTOBOT, STARS, XROCKET, PaymentError
 
 log = logging.getLogger(__name__)
 HOME = "Главное меню"
 ADMIN = "Админ-панель"
 CATALOG = "Каталог"
 BALANCE = "Баланс"
+PROFILE = "Кабинет"
 REFERRAL = "Реферальная программа"
 ORDERS = "Мои заказы"
 SUPPORT = "Поддержка"
@@ -37,19 +38,31 @@ ISSUE = "Выдано"
 APPROVE = "Выплата выполнена"
 REJECT = "Отклонить заявку"
 
+BUTTON_ICONS = {
+    HOME: "🏠", ADMIN: "🛠", CATALOG: "🛍", BALANCE: "💰", PROFILE: "👤",
+    REFERRAL: "🤝", ORDERS: "📦", SUPPORT: "💬",
+    ADD_CATEGORY: "📁", EDIT_CATEGORY: "✏️", ADD_PRODUCT: "➕", EDIT_PRODUCT: "✏️",
+    PENDING_ORDERS: "📦", WITHDRAWALS: "📋", TOP_UP: "➕", WITHDRAW: "💸",
+    BUY: "🛒", ISSUE: "✅", APPROVE: "✅", REJECT: "❌",
+    CRYPTOBOT: "💎", XROCKET: "🚀", STARS: "⭐",
+    "Название": "🏷", "Описание": "📝", "Цена": "💰",
+}
+BUTTON_LABELS = {name: f"{icon} {name}" for name, icon in BUTTON_ICONS.items()}
+BUTTON_ACTIONS = {label: name for name, label in BUTTON_LABELS.items()}
+BUTTON_STYLES = {TOP_UP: "primary", BUY: "success", ISSUE: "success", APPROVE: "success", REJECT: "danger"}
+
 CATEGORY_QUERY = "SELECT id, name AS label FROM categories ORDER BY id"
 CATEGORY_LISTS = {"catalog", "new_product_category", "edit_category"}
 CATEGORY_INPUTS = {"new_category", "rename_category"}
-CATEGORY_RESERVED_LABELS = {HOME, ADMIN, CATALOG, BALANCE, REFERRAL, ORDERS, SUPPORT, PREVIOUS, NEXT}
 
 LISTS = {
-    "catalog": ("Категории", CATEGORY_QUERY, "Категория"),
+    "catalog": ("🛍 Каталог", CATEGORY_QUERY, "Категория"),
     "new_product_category": ("Выберите категорию нового товара", CATEGORY_QUERY, "Категория"),
     "edit_category": ("Выберите категорию для редактирования", CATEGORY_QUERY, "Категория"),
-    "products": ("Товары категории", """
+    "products": ("🛒 Товары категории", """
         SELECT id, name AS label FROM products WHERE category_id = ? ORDER BY id
     """, "Товар"),
-    "my_orders": ("Мои заказы", """
+    "my_orders": ("📦 Мои заказы", """
         SELECT id, product AS label FROM orders WHERE buyer = ? ORDER BY id DESC
     """, "Заказ"),
     "edit_product": ("Выберите товар для редактирования", """
@@ -69,11 +82,15 @@ ADMIN_SCREENS = {
     "new_product_name", "new_product_description", "new_product_price",
     "edit_product", "edit_field", "edit_value", "pending_orders", "issue_order", "withdrawals", "resolve_withdrawal",
 }
+LIST_ICONS = {"Товар": "🛒", "Заказ": "📦", "Заявка": "📋"}
 
 
 def keyboard(rows):
     return ReplyKeyboardMarkup(
-        keyboard=[[KeyboardButton(text=name) for name in row] for row in rows],
+        keyboard=[
+            [KeyboardButton(text=BUTTON_LABELS.get(name, name), style=BUTTON_STYLES.get(name)) for name in row]
+            for row in rows
+        ],
         resize_keyboard=True,
         is_persistent=True,
     )
@@ -112,7 +129,7 @@ class Shop:
 
     async def home(self, message, state, text="Выберите раздел в нижнем меню."):
         await state.clear()
-        rows = [[CATALOG, BALANCE], [ORDERS, REFERRAL], [SUPPORT]]
+        rows = [[CATALOG, BALANCE], [ORDERS, PROFILE], [SUPPORT]]
         if message.from_user.id in self.config.admins:
             rows.append([ADMIN])
         await self.say(message, text, rows)
@@ -121,11 +138,13 @@ class Shop:
         args = command.args or ""
         referrer = int(args[4:]) if re.fullmatch(r"ref_[0-9]{1,18}", args) else None
         self.store.register(message.from_user.id, referrer)
-        await self.home(message, state, "Добро пожаловать в магазин.")
+        await self.home(message, state, "👋 Добро пожаловать в PCHELA!\n\nОткройте каталог или проверьте баланс в нижнем меню.")
 
     async def support(self, message, state):
         self.store.register(message.from_user.id)
-        await self.show(message, state, "support", f"Поддержка и вопросы по платежам\n{self.config.support_url}")
+        await self.show(message, state, "support",
+                        f"💬 <b>Поддержка</b>\n\n<a href=\"{escape(self.config.support_url)}\">Написать в Telegram</a>",
+                        parse_mode="HTML")
 
     async def pre_checkout(self, query):
         valid = self.payments.reserve_stars(query.from_user.id, query.invoice_payload, query.currency,
@@ -152,10 +171,10 @@ class Shop:
         columns = 1
         if screen in CATEGORY_LISTS:
             columns = 2
-            labels = self.category_labels(visible)
+            labels = {f"📁 {row['label']}": row["id"] for row in visible}
         else:
             labels = {
-                f"{noun} №{row['id']} · {' '.join(row['label'].split())[:44]}": row["id"]
+                f"{LIST_ICONS[noun]} {noun} №{row['id']} · {' '.join(row['label'].split())[:44]}": row["id"]
                 for row in visible
             }
         names = list(labels)
@@ -165,83 +184,101 @@ class Shop:
             navigation[PREVIOUS] = page - 1
         if len(rows) > PAGE_SIZE:
             navigation[NEXT] = page + 1
-        await self.show(message, state, screen, title if labels else f"{title}\nЗдесь пока пусто.",
-                        navigation, button_rows=button_rows, labels=labels, navigation=navigation, params=list(params))
-
-    @staticmethod
-    def category_labels(categories):
-        names = {category["label"] for category in categories}
-        labels = {}
-        for category in categories:
-            label = category["label"]
-            if label in CATEGORY_RESERVED_LABELS:
-                label += " ·"
-                while label in names or label in labels:
-                    label += " ·"
-            labels[label] = category["id"]
-        return labels
+        heading = f"<b>{title}</b>"
+        await self.show(message, state, screen, heading if labels else f"{heading}\n\nЗдесь пока пусто.",
+                        navigation, button_rows=button_rows, parse_mode="HTML",
+                        labels=labels, navigation=navigation, params=list(params))
 
     def order_message(self, order, admin=False):
-        status = "выдан" if order["status"] == "issued" else "ожидает выдачи"
-        info = (f"Заказ №{order['id']} · {status}\n"
-                f"{order['product']} × {order['quantity']}\n"
-                f"Оплачено {self.config.money(order['total'])}")
+        status = "✅ Выдан" if order["status"] == "issued" else "⏳ Ожидает выдачи"
+        info = (f"📦 <b>Заказ №{order['id']}</b>\n{status}\n\n"
+                f"{escape(order['product'])} × {order['quantity']}\n"
+                f"Оплачено <b>{self.config.money(order['total'])}</b>")
         if admin:
-            info = escape(info) + f"\nПокупатель {contact(order['username'], order['buyer'])}"
+            info += f"\n\nПокупатель {contact(order['username'], order['buyer'])}"
             if not order["username"]:
                 info += "\nУ покупателя нет username. Ему отправлена ссылка на администратора."
             return info + f"\nID покупателя {order['buyer']}"
         if not order["username"] and order["status"] == "pending":
-            return info + f"\nНапишите администратору и сообщите номер заказа.\n{self.config.admin_url}"
+            return info + (f"\n\n<a href=\"{escape(self.config.admin_url)}\">Напишите администратору</a>"
+                           " и сообщите номер заказа.")
         return info
 
     def withdrawal_message(self, request):
-        return (f"Заявка на вывод №{request['id']}\n"
-                f"Сумма {self.config.money(request['amount'])}\n"
+        return (f"💸 <b>Заявка на вывод №{request['id']}</b>\n\n"
+                f"Сумма <b>{self.config.money(request['amount'])}</b>\n"
                 f"Контакт {contact(request['username'], request['user_id'])}\n"
                 f"Реквизиты {escape(request['destination'])}")
+
+    async def profile(self, message, state, user):
+        deposited = self.store.one("""
+            SELECT COALESCE(SUM(amount), 0) AS total FROM deposits WHERE user_id = ? AND status = 'paid'
+        """, user["id"])["total"]
+        orders = self.store.one("""
+            SELECT COUNT(*) AS count, COALESCE(SUM(total), 0) AS spent FROM orders WHERE buyer = ?
+        """, user["id"])
+        await self.show(
+            message, state, "profile",
+            f"👤 <b>Личный кабинет</b>\n\n"
+            f"🆔 Telegram ID · <code>{user['id']}</code>\n"
+            f"💰 Баланс · <b>{self.config.money(user['balance'])}</b>\n"
+            f"💳 Пополнено за всё время · <b>{self.config.money(deposited)}</b>\n\n"
+            f"📦 Заказов · {orders['count']}\n"
+            f"🧾 Потрачено · {self.config.money(orders['spent'])}",
+            button_rows=[[ORDERS, REFERRAL], [TOP_UP]], parse_mode="HTML",
+        )
 
     async def referral(self, message, state, user):
         count = self.store.one("SELECT count(*) AS count FROM users WHERE referrer = ?", user["id"])["count"]
         await self.show(message, state, "referral",
-                        f"Ваша ссылка\nhttps://t.me/{self.bot_username}?start=ref_{user['id']}\n\n"
-                        f"Приглашено {count}\n"
-                        f"Вознаграждение {self.config.referral_percent}% от подтверждённых пополнений приглашённых пользователей\n"
-                        f"Доступно к выводу {self.config.money(user['referral_balance'])}", [WITHDRAW])
+                        f"🤝 <b>Реферальная программа</b>\n\n"
+                        f"Приглашено <b>{count}</b>\n"
+                        f"Бонус <b>{self.config.referral_percent}%</b> от подтверждённых пополнений приглашённых\n"
+                        f"Доступно к выводу <b>{self.config.money(user['referral_balance'])}</b>\n\n"
+                        f"Ваша ссылка\nhttps://t.me/{escape(self.bot_username)}?start=ref_{user['id']}",
+                        [WITHDRAW, PROFILE], parse_mode="HTML")
 
     async def admin(self, message, state, text="Админ-панель"):
-        await self.show(message, state, "admin", text,
-                        [ADD_CATEGORY, EDIT_CATEGORY, ADD_PRODUCT, EDIT_PRODUCT, PENDING_ORDERS, WITHDRAWALS])
+        await self.show(message, state, "admin", f"🛠 <b>{escape(text)}</b>",
+                        button_rows=[[ADD_CATEGORY, EDIT_CATEGORY], [ADD_PRODUCT, EDIT_PRODUCT],
+                                     [PENDING_ORDERS, WITHDRAWALS]], parse_mode="HTML")
 
     async def message(self, message, state):
         user = self.store.register(message.from_user.id)
         text = message.text.strip()
+        action = BUTTON_ACTIONS.get(text, text)
         data = await state.get_data()
         screen = data.get("screen")
         is_admin = user["id"] in self.config.admins
         try:
-            if text == HOME or (screen in ADMIN_SCREENS and not is_admin):
+            if action == HOME or (screen in ADMIN_SCREENS and not is_admin):
                 await self.home(message, state)
             elif screen in CATEGORY_INPUTS:
                 await self.admin_input(message, state, screen, data, text)
-            elif text == SUPPORT:
+            elif action == SUPPORT:
                 await self.support(message, state)
-            elif text == CATALOG:
+            elif action == CATALOG:
                 await self.listing(message, state, "catalog")
-            elif text == BALANCE:
-                await self.show(message, state, "balance", f"Баланс {self.config.money(user['balance'])}", [TOP_UP])
-            elif text == REFERRAL:
+            elif action == BALANCE:
+                await self.show(message, state, "balance",
+                                f"💰 <b>Баланс</b>\n\nДоступно <b>{self.config.money(user['balance'])}</b>",
+                                [TOP_UP], parse_mode="HTML")
+            elif action == PROFILE:
+                await self.profile(message, state, user)
+            elif action == REFERRAL:
                 await self.referral(message, state, user)
-            elif text == ORDERS:
+            elif action == ORDERS:
                 await self.listing(message, state, "my_orders", user["id"])
-            elif is_admin and text == ADMIN:
+            elif is_admin and action == ADMIN:
                 await self.admin(message, state)
             elif screen in LISTS:
                 await self.choose(message, state, screen, data, text)
             elif screen in ADMIN_SCREENS or (screen == "admin" and is_admin):
-                await self.admin_input(message, state, screen, data, text)
+                value = action if screen in {"admin", "edit_field", "issue_order", "resolve_withdrawal"} else text
+                await self.admin_input(message, state, screen, data, value)
             else:
-                await self.customer_input(message, state, screen, data, text, user)
+                value = action if screen in {"balance", "profile", "provider", "purchase", "referral"} else text
+                await self.customer_input(message, state, screen, data, value, user)
         except ValueError as error:
             await self.say(message, str(error))
         except sqlite3.IntegrityError:
@@ -262,17 +299,17 @@ class Shop:
             product = self.store.one("SELECT * FROM products WHERE id = ?", item)
             if screen == "products":
                 await self.show(message, state, "quantity",
-                                f"{product['name']}\n\n{product['description']}\n\n"
-                                f"Цена за единицу {self.config.money(product['price'])}\n"
+                                f"🛒 <b>{escape(product['name'])}</b>\n\n{escape(product['description'])}\n\n"
+                                f"Цена за единицу <b>{self.config.money(product['price'])}</b>\n\n"
                                 "Выберите количество или введите число от 1 до 999.",
-                                ["1", "2", "5", "10"], product=dict(product))
+                                button_rows=[["1", "2"], ["5", "10"]], parse_mode="HTML", product=dict(product))
             else:
                 await self.show(message, state, "edit_field",
                                 f"{product['name']}\n{product['description']}\n{self.config.money(product['price'])}",
                                 ["Название", "Описание", "Цена"], item=item)
         elif screen == "my_orders":
             order = self.store.one("SELECT * FROM orders WHERE id = ? AND buyer = ?", item, message.from_user.id)
-            await self.show(message, state, "receipt", self.order_message(order), [ORDERS])
+            await self.show(message, state, "receipt", self.order_message(order), [ORDERS], parse_mode="HTML")
         elif screen == "new_product_category":
             await self.show(message, state, "new_product_name", "Введите название товара.", category=item)
         elif screen == "edit_category":
@@ -304,23 +341,36 @@ class Shop:
             quote = {**product, "product_id": product["id"], "quantity": quantity, "key": uuid4().hex}
             total = self.config.money(quantity * product["price"])
             await self.show(message, state, "purchase",
-                            f"{product['name']} × {quantity}\nСумма заказа {total}\n"
-                            f"Ваш баланс {self.config.money(user['balance'])}", [BUY, BALANCE], quote=quote)
+                            f"🧾 <b>Подтверждение заказа</b>\n\n{escape(product['name'])} × {quantity}\n\n"
+                            f"К оплате <b>{total}</b>\nВаш баланс {self.config.money(user['balance'])}",
+                            [BUY, BALANCE], parse_mode="HTML", quote=quote)
         elif screen == "purchase" and text == BUY:
             order = self.store.purchase(user["id"], message.from_user.username, data["quote"],
                                         self.config.admins,
                                         lambda order: self.order_message(order, admin=True))
-            await self.show(message, state, "receipt", self.order_message(order), [ORDERS])
-        elif screen == "balance" and text == TOP_UP:
-            await self.show(message, state, "provider", "Выберите способ оплаты.", self.payments.providers)
+            await self.show(message, state, "receipt", self.order_message(order), [ORDERS], parse_mode="HTML")
+        elif screen in {"balance", "profile"} and text == TOP_UP:
+            await self.show(message, state, "provider", "💳 <b>Пополнение баланса</b>\n\nВыберите способ оплаты.",
+                            self.payments.providers, parse_mode="HTML")
         elif screen == "provider" and text in self.payments.providers:
-            await self.show(message, state, "deposit", f"Введите сумму пополнения ({self.config.currency}).", provider=text)
+            await self.show(message, state, "deposit",
+                            f"<b>{BUTTON_LABELS[text]}</b>\n\nВведите сумму пополнения в {self.config.currency}.",
+                            [BALANCE], parse_mode="HTML", provider=text)
         elif screen == "deposit":
             amount = self.config.parse_amount(text)
-            url = await self.payments.create(user["id"], data["provider"], amount)
-            await self.show(message, state, "invoice",
-                            f"Счёт на {self.config.money(amount)}\n{url}\n"
-                            "После подтверждения оплаты баланс обновится автоматически.", [BALANCE])
+            provider = data["provider"]
+            url = await self.payments.create(user["id"], provider, amount)
+            total = self.config.money(amount)
+            await state.set_data({"screen": "invoice"})
+            await message.answer(
+                f"💳 <b>Счёт на пополнение</b>\n\n"
+                f"Способ оплаты · {provider}\nСумма · <b>{total}</b>\n\n"
+                "Баланс обновится после подтверждения платежа.",
+                parse_mode="HTML",
+                reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                    [InlineKeyboardButton(text=f"💳 Оплатить {total}", url=url, style="success")],
+                ]),
+            )
         elif screen == "referral" and text == WITHDRAW:
             if not user["referral_balance"]:
                 raise ValueError("На реферальном балансе пока нет средств.")

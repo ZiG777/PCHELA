@@ -5,7 +5,7 @@ from unittest.mock import AsyncMock, MagicMock
 from aiogram import Bot, Dispatcher
 from aiogram.client.session.base import BaseSession
 from aiogram.methods import AnswerPreCheckoutQuery, CreateInvoiceLink, SendMessage
-from aiogram.types import ReplyKeyboardMarkup, Update
+from aiogram.types import InlineKeyboardMarkup, ReplyKeyboardMarkup, Update
 
 from shop.config import Config
 from shop.payments import CRYPTOBOT, STARS, XROCKET, PaymentError, Payments
@@ -66,37 +66,37 @@ class ShopTests(unittest.IsolatedAsyncioTestCase):
         await self.chat(2, "/start ref_1")
         await self.chat(2, "/start ref_8")
         await self.chat(8, "/start")
-        await self.chat(8, "Админ-панель")
-        await self.chat(8, "Добавить категорию")
+        await self.chat(8, "🛠 Админ-панель")
+        await self.chat(8, "📁 Добавить категорию")
         await self.chat(8, "Игры")
-        await self.chat(8, "Добавить товар")
-        await self.chat(8, "Игры")
+        await self.chat(8, "➕ Добавить товар")
+        await self.chat(8, "📁 Игры")
         await self.chat(8, "Товар")
         await self.chat(8, "Описание товара")
         await self.chat(8, "50")
-        await self.chat(8, "Редактировать товар")
-        await self.chat(8, "Товар №1 · Игры / Товар")
-        await self.chat(8, "Цена")
+        await self.chat(8, "✏️ Редактировать товар")
+        await self.chat(8, "🛒 Товар №1 · Игры / Товар")
+        await self.chat(8, "💰 Цена")
         await self.chat(8, "100")
 
-        await self.chat(2, "Каталог")
-        await self.chat(2, "Игры")
-        await self.chat(2, "Товар №1 · Товар")
+        await self.chat(2, "🛍 Каталог")
+        await self.chat(2, "📁 Игры")
+        await self.chat(2, "🛒 Товар №1 · Товар")
         await self.chat(2, "2")
-        call = await self.chat(2, "Оплатить с баланса")
+        call = await self.chat(2, "🛒 Оплатить с баланса")
         self.assertIn("Недостаточно средств", call.text)
         self.assertFalse(self.store.all("SELECT id FROM orders"))
         deposit = self.store.create_deposit(2, STARS, 200)
         self.assertEqual(self.store.one("SELECT referral_balance FROM users WHERE id = 1")["referral_balance"], 0)
         self.payments.credit(deposit, "test-credit")
-        referral = await self.chat(1, "Реферальная программа")
-        self.assertIn("Доступно к выводу 10 ⭐", referral.text)
-        receipt = await self.chat(2, "Оплатить с баланса")
+        referral = await self.chat(1, "🤝 Реферальная программа")
+        self.assertIn("Доступно к выводу <b>10 ⭐</b>", referral.text)
+        receipt = await self.chat(2, "🛒 Оплатить с баланса")
         self.assertIsInstance(receipt.reply_markup, ReplyKeyboardMarkup)
         self.assertIn("Заказ №1", receipt.text)
         self.assertIn(self.config.admin_url, receipt.text)
-        await self.chat(2, "Оплатить с баланса")
-        await self.chat(2, "Выдано")
+        await self.chat(2, "🛒 Оплатить с баланса")
+        await self.chat(2, "✅ Выдано")
         order = self.store.one("SELECT * FROM orders")
         self.assertEqual(order["status"], "pending")
         self.assertEqual(order["total"], 200)
@@ -105,33 +105,55 @@ class ShopTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.store.one("SELECT balance FROM users WHERE id = 2")["balance"], 0)
         self.assertEqual(self.store.one("SELECT referral_balance FROM users WHERE id = 1")["referral_balance"], 10)
 
+        self.store.create_deposit(2, STARS, 300)
+        home = await self.chat(2, "🏠 Главное меню")
+        home_buttons = [button.text for row in home.reply_markup.keyboard for button in row]
+        self.assertIn("👤 Кабинет", home_buttons)
+        self.assertNotIn("🤝 Реферальная программа", home_buttons)
+        profile = await self.chat(2, "👤 Кабинет")
+        self.assertIn("Telegram ID · <code>2</code>", profile.text)
+        self.assertIn("Баланс · <b>0 ⭐</b>", profile.text)
+        self.assertIn("Пополнено за всё время · <b>200 ⭐</b>", profile.text)
+        self.assertIn("Заказов · 1", profile.text)
+        self.assertIn("Потрачено · 200 ⭐", profile.text)
+        referral_button = profile.reply_markup.keyboard[0][1].text
+        self.assertEqual(referral_button, "🤝 Реферальная программа")
+        referral_screen = await self.chat(2, referral_button)
+        self.assertIn("https://t.me/test_shop_bot?start=ref_2", referral_screen.text)
+
         # A pending order from the old scheme may still have a reward recorded.
         self.store.update("UPDATE orders SET reward = 10 WHERE id = 1")
-        await self.chat(8, "Заказы к выдаче")
-        await self.chat(8, "Заказ №1 · Товар")
-        await self.chat(8, "Выдано")
+        await self.chat(8, "📦 Заказы к выдаче")
+        await self.chat(8, "📦 Заказ №1 · Товар")
+        await self.chat(8, "✅ Выдано")
         with self.assertRaises(ValueError):
             self.store.complete_order(1)
         self.assertEqual(self.store.one("SELECT referral_balance FROM users WHERE id = 1")["referral_balance"], 10)
 
-        await self.chat(1, "Реферальная программа")
-        await self.chat(1, "Запросить вывод")
+        await self.chat(1, "🤝 Реферальная программа")
+        await self.chat(1, "💸 Запросить вывод")
         await self.chat(1, "10")
         await self.chat(1, "@recipient")
-        await self.chat(8, "Заявки на вывод")
-        await self.chat(8, "Заявка №1 · @recipient")
-        await self.chat(8, "Отклонить заявку")
+        await self.chat(8, "📋 Заявки на вывод")
+        await self.chat(8, "📋 Заявка №1 · @recipient")
+        await self.chat(8, "❌ Отклонить заявку")
         self.assertEqual(self.store.one("SELECT referral_balance FROM users WHERE id = 1")["referral_balance"], 10)
         self.assertEqual(self.store.one("SELECT status FROM withdrawals")["status"], "rejected")
 
     async def test_stars_invoice_checks_owner_amount_and_duplicate_delivery(self):
         await self.chat(1, "/start")
         await self.chat(2, "/start ref_1")
-        await self.chat(2, "Баланс")
-        await self.chat(2, "Пополнить баланс")
-        await self.chat(2, STARS)
+        await self.chat(2, "👤 Кабинет")
+        await self.chat(2, "➕ Пополнить баланс")
+        amount_prompt = await self.chat(2, f"⭐ {STARS}")
+        self.assertEqual([row[0].text for row in amount_prompt.reply_markup.keyboard],
+                         ["💰 Баланс", "🏠 Главное меню"])
         response = await self.chat(2, "110")
-        self.assertIn("https://t.me/$test-invoice", response.text)
+        self.assertIsInstance(response.reply_markup, InlineKeyboardMarkup)
+        button = response.reply_markup.inline_keyboard[0][0]
+        self.assertEqual(button.url, "https://t.me/$test-invoice")
+        self.assertEqual(button.text, "💳 Оплатить 110 ⭐")
+        self.assertNotIn(button.url, response.text)
         invoice = next(call for call in self.telegram.calls if isinstance(call, CreateInvoiceLink))
         fields = {"currency": "XTR", "total_amount": 110, "invoice_payload": invoice.payload}
         for payer, query_id, amount, expected in (
@@ -147,8 +169,8 @@ class ShopTests(unittest.IsolatedAsyncioTestCase):
         payment = {**fields, "telegram_payment_charge_id": "charge", "provider_payment_charge_id": ""}
         await self.chat(2, successful_payment=payment)
         await self.chat(2, successful_payment=payment)
-        result = await self.chat(2, "Баланс")
-        self.assertEqual(result.text, "Баланс 110 ⭐")
+        result = await self.chat(2, "💰 Баланс")
+        self.assertIn("Доступно <b>110 ⭐</b>", result.text)
         self.assertEqual(self.store.one("SELECT referral_balance FROM users WHERE id = 1")["referral_balance"], 5)
         self.assertEqual(self.store.one("SELECT count(*) AS total FROM outbox")["total"], 1)
 
@@ -178,17 +200,26 @@ class ShopTests(unittest.IsolatedAsyncioTestCase):
         config = replace(self.config, currency="USDT", cryptobot="test", xrocket="test")
         http = MagicMock()
         payments = Payments(config, store, self.bot, http)
+        self.dispatcher = Dispatcher()
+        self.dispatcher.include_router(Shop(config, store, payments, "test_shop_bot").router)
         link = "https://t.me/test_pay?start=invoice"
-        for provider, host, path, status, wrapper in (
-            (CRYPTOBOT, "pay.crypt.bot", "api/createInvoice", 200,
+        for provider, label, host, path, status, wrapper in (
+            (CRYPTOBOT, "💎 CryptoBot", "pay.crypt.bot", "api/createInvoice", 200,
              {"ok": True, "result": {"invoice_id": 123, "bot_invoice_url": link}}),
-            (XROCKET, "pay.xrocket.tg", "tg-invoices", 201,
+            (XROCKET, "🚀 xRocket", "pay.xrocket.tg", "tg-invoices", 201,
              {"success": True, "data": {"id": 123, "link": link}}),
         ):
             response = http.request.return_value.__aenter__.return_value
             response.status = status
             response.json = AsyncMock(return_value=wrapper)
-            self.assertEqual(await payments.create(2, provider, 123), link)
+            await self.chat(2, "👤 Кабинет")
+            await self.chat(2, "➕ Пополнить баланс")
+            await self.chat(2, label)
+            invoice = await self.chat(2, "1,23")
+            button = invoice.reply_markup.inline_keyboard[0][0]
+            self.assertEqual(button.text, "💳 Оплатить 1.23 USDT")
+            self.assertEqual(button.url, link)
+            self.assertNotIn(link, invoice.text)
             args, kwargs = http.request.call_args
             self.assertEqual(args, ("POST", f"https://{host}/{path}"))
             self.assertEqual(float(kwargs["json"]["amount"]), 1.23)
@@ -201,12 +232,12 @@ class ShopTests(unittest.IsolatedAsyncioTestCase):
         self.store.update("UPDATE users SET balance = 100 WHERE id = 2")
         self.store.update("INSERT INTO categories (name) VALUES ('Игры')")
         self.store.update("INSERT INTO products (category_id, name, description, price) VALUES (1, 'Товар', 'Текст', 10)")
-        await self.chat(2, "Каталог")
-        await self.chat(2, "Игры")
-        await self.chat(2, "Товар №1 · Товар")
+        await self.chat(2, "🛍 Каталог")
+        await self.chat(2, "📁 Игры")
+        await self.chat(2, "🛒 Товар №1 · Товар")
         await self.chat(2, "1")
         self.store.update("UPDATE products SET price = 50 WHERE id = 1")
-        reply = await self.chat(2, "Оплатить с баланса")
+        reply = await self.chat(2, "🛒 Оплатить с баланса")
         self.assertIn("Товар изменился", reply.text)
         self.assertEqual(self.store.one("SELECT balance FROM users WHERE id = 2")["balance"], 100)
 
@@ -215,7 +246,7 @@ class ShopTests(unittest.IsolatedAsyncioTestCase):
                         "Фальшивая категория"):
             result = await self.chat(2, message)
             self.assertIsInstance(result, SendMessage)
-            self.assertNotIn("Админ-панель", [button.text for row in result.reply_markup.keyboard for button in row])
+            self.assertNotIn("🛠 Админ-панель", [button.text for row in result.reply_markup.keyboard for button in row])
         self.assertFalse(self.store.all("SELECT id FROM categories"))
 
     async def test_rename_category_and_show_names_in_two_columns(self):
@@ -223,16 +254,16 @@ class ShopTests(unittest.IsolatedAsyncioTestCase):
             self.store.update("INSERT INTO categories (name) VALUES (?)", name)
         self.store.update("INSERT INTO products (category_id, name, description, price) VALUES (1, 'Товар', 'Текст', 10)")
 
-        await self.chat(8, "Админ-панель")
-        await self.chat(8, "Редактировать категорию")
-        await self.chat(8, "Игры")
+        await self.chat(8, "🛠 Админ-панель")
+        await self.chat(8, "✏️ Редактировать категорию")
+        await self.chat(8, "📁 Игры")
         duplicate = await self.chat(8, "Сервисы")
         self.assertIn("таким названием", duplicate.text)
         saved = await self.chat(8, "Аккаунты")
-        self.assertEqual(saved.text, "Категория переименована.")
+        self.assertIn("Категория переименована.", saved.text)
 
-        catalog = await self.chat(2, "Каталог")
+        catalog = await self.chat(2, "🛍 Каталог")
         self.assertEqual([[button.text for button in row] for row in catalog.reply_markup.keyboard],
-                         [["Аккаунты", "Сервисы"], ["Подписки"], ["Главное меню"]])
-        products = await self.chat(2, "Аккаунты")
-        self.assertEqual(products.reply_markup.keyboard[0][0].text, "Товар №1 · Товар")
+                         [["📁 Аккаунты", "📁 Сервисы"], ["📁 Подписки"], ["🏠 Главное меню"]])
+        products = await self.chat(2, "📁 Аккаунты")
+        self.assertEqual(products.reply_markup.keyboard[0][0].text, "🛒 Товар №1 · Товар")
