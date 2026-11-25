@@ -38,22 +38,21 @@ EDIT_CATEGORY = "Редактировать категорию"
 ADD_PRODUCT = "Добавить товар"
 EDIT_PRODUCT = "Редактировать товар"
 PENDING_ORDERS = "Заказы к выдаче"
-WITHDRAWALS = "Заявки на вывод"
+WITHDRAWALS = "Старые заявки на вывод"
 TOP_UP = "Пополнить баланс"
-WITHDRAW = "Запросить вывод"
 PREVIOUS = "← Предыдущая"
 NEXT = "Следующая →"
 PAGE_SIZE = 8
 BUY = "Оплатить с баланса"
 ISSUE = "Выдано"
-APPROVE = "Выплата выполнена"
-REJECT = "Отклонить заявку"
+APPROVE = "Уже выплачено"
+REJECT = "Вернуть на баланс"
 
 BUTTON_ICONS = {
     HOME: "🏠", ADMIN: "🛠", CATALOG: "🛍", BALANCE: "💰", PROFILE: "👤",
     REFERRAL: "🤝", ORDERS: "📦", SUPPORT: "💬",
     ADD_CATEGORY: "📁", EDIT_CATEGORY: "✏️", ADD_PRODUCT: "➕", EDIT_PRODUCT: "✏️",
-    PENDING_ORDERS: "📦", WITHDRAWALS: "📋", TOP_UP: "➕", WITHDRAW: "💸",
+    PENDING_ORDERS: "📦", WITHDRAWALS: "📋", TOP_UP: "➕",
     BUY: "🛒", ISSUE: "✅", APPROVE: "✅", REJECT: "❌",
     CRYPTOBOT: "💎", XROCKET: "🚀", STARS: "⭐",
     "Название": "🏷", "Описание": "📝", "Цена": "💰",
@@ -84,7 +83,7 @@ LISTS = {
     "pending_orders": ("Заказы к выдаче", """
         SELECT id, product AS label FROM orders WHERE status = 'pending' ORDER BY id
     """, "Заказ"),
-    "withdrawals": ("Заявки на вывод", """
+    "withdrawals": ("Старые заявки на вывод", """
         SELECT id, destination AS label FROM withdrawals WHERE status = 'pending' ORDER BY id
     """, "Заявка"),
 }
@@ -271,15 +270,16 @@ class Shop:
         await self.show(message, state, "referral",
                         f"🤝 <b>Реферальная программа</b>\n\n"
                         f"Приглашено <b>{count}</b>\n"
-                        f"Бонус <b>{self.config.referral_percent}%</b> от подтверждённых пополнений приглашённых\n"
-                        f"Доступно к выводу <b>{self.config.money(user['referral_balance'])}</b>\n\n"
+                        f"Бонус <b>{self.config.referral_percent}%</b> от подтверждённых пополнений приглашённых "
+                        "сразу зачисляется на внутренний баланс и доступен для покупок.\n\n"
                         f"Ваша ссылка\nhttps://t.me/{escape(self.bot_username)}?start=ref_{user['id']}",
-                        [WITHDRAW, PROFILE], parse_mode="HTML")
+                        [PROFILE], parse_mode="HTML")
 
     async def admin(self, message, state, text="Админ-панель"):
-        await self.show(message, state, "admin", f"🛠 <b>{escape(text)}</b>",
-                        button_rows=[[ADD_CATEGORY, EDIT_CATEGORY], [ADD_PRODUCT, EDIT_PRODUCT],
-                                     [PENDING_ORDERS, WITHDRAWALS]], parse_mode="HTML")
+        rows = [[ADD_CATEGORY, EDIT_CATEGORY], [ADD_PRODUCT, EDIT_PRODUCT], [PENDING_ORDERS]]
+        if self.store.one("SELECT 1 FROM withdrawals WHERE status = 'pending' LIMIT 1"):
+            rows[-1].append(WITHDRAWALS)
+        await self.show(message, state, "admin", f"🛠 <b>{escape(text)}</b>", button_rows=rows, parse_mode="HTML")
 
     async def message(self, message, state):
         user, _ = self.store.register(message.from_user.id)
@@ -315,7 +315,7 @@ class Shop:
                 value = action if screen in {"admin", "edit_field", "issue_order", "resolve_withdrawal"} else text
                 await self.admin_input(message, state, screen, data, value)
             else:
-                value = action if screen in {"balance", "profile", "provider", "purchase", "referral"} else text
+                value = action if screen in {"balance", "profile", "provider", "purchase"} else text
                 await self.customer_input(message, state, screen, data, value, user)
         except ValueError as error:
             await self.say(message, str(error))
@@ -409,23 +409,6 @@ class Shop:
                     [InlineKeyboardButton(text=f"💳 Оплатить {total}", url=url, style="success")],
                 ]),
             )
-        elif screen == "referral" and text == WITHDRAW:
-            if not user["referral_balance"]:
-                raise ValueError("На реферальном балансе пока нет средств.")
-            await self.show(message, state, "withdraw_amount", "Введите сумму вывода.")
-        elif screen == "withdraw_amount":
-            amount = self.config.parse_amount(text)
-            if amount > user["referral_balance"]:
-                raise ValueError("Недостаточно средств на реферальном балансе.")
-            await self.show(message, state, "withdraw_destination",
-                            "Укажите реквизиты для выплаты или контакт для согласования способа перевода.", amount=amount)
-        elif screen == "withdraw_destination":
-            if not text or len(text) > 300:
-                raise ValueError("Введите реквизиты длиной до 300 символов.")
-            request_id = self.store.open_withdrawal(user["id"], message.from_user.username, data["amount"],
-                                                    text, self.config.admins, self.withdrawal_message)
-            await self.show(message, state, "withdraw_receipt",
-                            f"Заявка №{request_id} отправлена администратору.", [REFERRAL])
         elif screen is None:
             await self.home(message, state)
         else:

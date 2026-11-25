@@ -56,6 +56,10 @@ class Store:
             self.db.execute("INSERT OR IGNORE INTO settings VALUES ('currency', ?)", (currency,))
             if self.one("SELECT value FROM settings WHERE name = 'currency'")["value"] != currency:
                 raise ValueError("Валюта базы отличается от SHOP_CURRENCY. Укажите другую DATABASE_PATH.")
+            self.db.execute("""
+                UPDATE users SET balance = balance + referral_balance, referral_balance = 0
+                WHERE referral_balance > 0
+            """)
 
     @contextmanager
     def write(self):
@@ -116,21 +120,6 @@ class Store:
             self.db.execute("UPDATE orders SET status = 'issued' WHERE id = ?", (order_id,))
             self.notify([order["buyer"]], f"Заказ №{order_id} отмечен как выданный.")
 
-    def open_withdrawal(self, user_id, username, amount, destination, admins, notice):
-        with self.write():
-            debit = self.db.execute("""
-                UPDATE users SET referral_balance = referral_balance - ?
-                WHERE id = ? AND referral_balance >= ?
-            """, (amount, user_id, amount))
-            if not debit.rowcount:
-                raise ValueError("Недостаточно средств на реферальном балансе.")
-            request_id = self.db.execute("""
-                INSERT INTO withdrawals (user_id, username, amount, destination) VALUES (?, ?, ?, ?)
-            """, (user_id, username, amount, destination)).lastrowid
-            request = self.one("SELECT * FROM withdrawals WHERE id = ?", request_id)
-            self.notify(admins, notice(request), "HTML")
-            return request_id
-
     def resolve_withdrawal(self, request_id, paid):
         with self.write():
             request = self.one("SELECT * FROM withdrawals WHERE id = ? AND status = 'pending'", request_id)
@@ -139,9 +128,9 @@ class Store:
             self.db.execute("UPDATE withdrawals SET status = ? WHERE id = ?",
                             ("paid" if paid else "rejected", request_id))
             if not paid:
-                self.db.execute("UPDATE users SET referral_balance = referral_balance + ? WHERE id = ?",
+                self.db.execute("UPDATE users SET balance = balance + ? WHERE id = ?",
                                 (request["amount"], request["user_id"]))
-            status = "выплачена" if paid else "отклонена, сумма возвращена на реферальный баланс"
+            status = "выплачена" if paid else "закрыта, сумма возвращена на внутренний баланс"
             self.notify([request["user_id"]], f"Заявка на вывод №{request_id} {status}.")
 
     def create_deposit(self, user_id, provider, amount):
@@ -165,7 +154,7 @@ class Store:
             reward = deposit["amount"] * referral_percent // 100
             if reward:
                 self.db.execute("""
-                    UPDATE users SET referral_balance = referral_balance + ?
+                    UPDATE users SET balance = balance + ?
                     WHERE id = (SELECT referrer FROM users WHERE id = ?)
                 """, (reward, deposit["user_id"]))
             self.notify([deposit["user_id"]], notice(deposit["amount"]))

@@ -1,5 +1,7 @@
 import unittest
 from dataclasses import replace
+from pathlib import Path
+from tempfile import TemporaryDirectory
 from unittest.mock import AsyncMock, MagicMock
 
 from aiogram import Bot, Dispatcher
@@ -61,7 +63,7 @@ class ShopTests(unittest.IsolatedAsyncioTestCase):
             message["text"] = text
         return await self.feed({"message": message})
 
-    async def test_catalog_purchase_issue_and_withdrawal(self):
+    async def test_catalog_purchase_issue_and_referral_bonus(self):
         await self.chat(1, "/start")
         await self.chat(2, "/start ref_1")
         await self.chat(2, "/start ref_8")
@@ -87,10 +89,13 @@ class ShopTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("Недостаточно средств", call.text)
         self.assertFalse(self.store.all("SELECT id FROM orders"))
         deposit = self.store.create_deposit(2, STARS, 200)
-        self.assertEqual(self.store.one("SELECT referral_balance FROM users WHERE id = 1")["referral_balance"], 0)
+        self.assertEqual(self.store.one("SELECT balance FROM users WHERE id = 1")["balance"], 0)
         self.payments.credit(deposit, "test-credit")
         referral = await self.chat(1, "🤝 Реферальная программа")
-        self.assertIn("Доступно к выводу <b>10 ⭐</b>", referral.text)
+        self.assertIn("на внутренний баланс", referral.text)
+        self.assertNotIn("вывод", referral.text)
+        self.assertEqual([row[0].text for row in referral.reply_markup.keyboard], ["👤 Кабинет", "🏠 Главное меню"])
+        self.assertEqual(self.store.one("SELECT balance FROM users WHERE id = 1")["balance"], 10)
         receipt = await self.chat(2, "🛒 Оплатить с баланса")
         self.assertIsInstance(receipt.reply_markup, ReplyKeyboardMarkup)
         self.assertIn("Заказ №1", receipt.text)
@@ -103,7 +108,7 @@ class ShopTests(unittest.IsolatedAsyncioTestCase):
         admin_notice = self.store.one("SELECT message FROM outbox WHERE recipient = 8")["message"]
         self.assertIn("tg://user?id=2", admin_notice)
         self.assertEqual(self.store.one("SELECT balance FROM users WHERE id = 2")["balance"], 0)
-        self.assertEqual(self.store.one("SELECT referral_balance FROM users WHERE id = 1")["referral_balance"], 10)
+        self.assertEqual(self.store.one("SELECT balance FROM users WHERE id = 1")["balance"], 10)
 
         self.store.create_deposit(2, STARS, 300)
         home = await self.chat(2, "🏠 Главное меню")
@@ -128,17 +133,18 @@ class ShopTests(unittest.IsolatedAsyncioTestCase):
         await self.chat(8, "✅ Выдано")
         with self.assertRaises(ValueError):
             self.store.complete_order(1)
-        self.assertEqual(self.store.one("SELECT referral_balance FROM users WHERE id = 1")["referral_balance"], 10)
+        self.assertEqual(self.store.one("SELECT balance FROM users WHERE id = 1")["balance"], 10)
 
-        await self.chat(1, "🤝 Реферальная программа")
         await self.chat(1, "💸 Запросить вывод")
-        await self.chat(1, "10")
-        await self.chat(1, "@recipient")
-        await self.chat(8, "📋 Заявки на вывод")
-        await self.chat(8, "📋 Заявка №1 · @recipient")
-        await self.chat(8, "❌ Отклонить заявку")
-        self.assertEqual(self.store.one("SELECT referral_balance FROM users WHERE id = 1")["referral_balance"], 10)
-        self.assertEqual(self.store.one("SELECT status FROM withdrawals")["status"], "rejected")
+        self.assertFalse(self.store.all("SELECT id FROM withdrawals"))
+        self.store.update("UPDATE products SET price = 10 WHERE id = 1")
+        await self.chat(1, "🛍 Каталог")
+        await self.chat(1, "📁 Игры")
+        await self.chat(1, "🛒 Товар")
+        await self.chat(1, "1")
+        receipt = await self.chat(1, "🛒 Оплатить с баланса")
+        self.assertIn("Заказ №2", receipt.text)
+        self.assertEqual(self.store.one("SELECT balance FROM users WHERE id = 1")["balance"], 0)
 
     async def test_stars_invoice_checks_owner_amount_and_duplicate_delivery(self):
         await self.chat(1, "/start")
@@ -165,14 +171,43 @@ class ShopTests(unittest.IsolatedAsyncioTestCase):
             }})
             self.assertIsInstance(answer, AnswerPreCheckoutQuery)
             self.assertEqual(answer.ok, expected)
-        self.assertEqual(self.store.one("SELECT referral_balance FROM users WHERE id = 1")["referral_balance"], 0)
+        self.assertEqual(self.store.one("SELECT balance FROM users WHERE id = 1")["balance"], 0)
         payment = {**fields, "telegram_payment_charge_id": "charge", "provider_payment_charge_id": ""}
         await self.chat(2, successful_payment=payment)
         await self.chat(2, successful_payment=payment)
         result = await self.chat(2, "💰 Баланс")
         self.assertIn("Доступно <b>110 ⭐</b>", result.text)
-        self.assertEqual(self.store.one("SELECT referral_balance FROM users WHERE id = 1")["referral_balance"], 5)
+        self.assertEqual(self.store.one("SELECT balance FROM users WHERE id = 1")["balance"], 5)
         self.assertEqual(self.store.one("SELECT count(*) AS total FROM outbox")["total"], 1)
+
+    def test_migrates_existing_referral_balance_only_once(self):
+        with TemporaryDirectory() as directory:
+            path = str(Path(directory) / "shop.sqlite3")
+            old = Store(path, "XTR")
+            old.register(1)
+            old.update("UPDATE users SET balance = 20, referral_balance = 15 WHERE id = 1")
+            old.db.close()
+            for _ in range(2):
+                migrated = Store(path, "XTR")
+                try:
+                    user = migrated.one("SELECT * FROM users WHERE id = 1")
+                    self.assertEqual(user["balance"], 35)
+                    self.assertEqual(user["referral_balance"], 0)
+                finally:
+                    migrated.db.close()
+
+    async def test_admin_can_return_an_old_withdrawal_to_internal_balance(self):
+        self.store.register(2)
+        self.store.update("INSERT INTO withdrawals (user_id, amount, destination) VALUES (2, 10, '@recipient')")
+        await self.chat(8, "🛠 Админ-панель")
+        await self.chat(8, "📋 Старые заявки на вывод")
+        await self.chat(8, "📋 Заявка №1 · @recipient")
+        result = await self.chat(8, "❌ Вернуть на баланс")
+        self.assertNotIn("📋 Старые заявки на вывод", [button.text for row in result.reply_markup.keyboard for button in row])
+        self.assertEqual(self.store.one("SELECT balance FROM users WHERE id = 2")["balance"], 10)
+        with self.assertRaises(ValueError):
+            self.store.resolve_withdrawal(1, paid=False)
+        self.assertEqual(self.store.one("SELECT balance FROM users WHERE id = 2")["balance"], 10)
 
     async def test_wrong_crypto_invoice_amount_is_rejected_and_valid_invoice_credited_once(self):
         self.store.register(1)
@@ -191,7 +226,7 @@ class ShopTests(unittest.IsolatedAsyncioTestCase):
             await self.payments.check_crypto(deposit)
             await self.payments.check_crypto(deposit)
         self.assertEqual(self.store.one("SELECT balance FROM users WHERE id = 2")["balance"], 246)
-        self.assertEqual(self.store.one("SELECT referral_balance FROM users WHERE id = 1")["referral_balance"], 12)
+        self.assertEqual(self.store.one("SELECT balance FROM users WHERE id = 1")["balance"], 12)
 
     async def test_create_crypto_invoices_preserves_provider_ids_and_amount(self):
         store = Store(":memory:", "USDT")
