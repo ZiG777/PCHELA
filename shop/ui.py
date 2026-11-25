@@ -22,6 +22,7 @@ REFERRAL = "Реферальная программа"
 ORDERS = "Мои заказы"
 SUPPORT = "Поддержка"
 ADD_CATEGORY = "Добавить категорию"
+EDIT_CATEGORY = "Редактировать категорию"
 ADD_PRODUCT = "Добавить товар"
 EDIT_PRODUCT = "Редактировать товар"
 PENDING_ORDERS = "Заказы к выдаче"
@@ -36,17 +37,21 @@ ISSUE = "Выдано"
 APPROVE = "Выплата выполнена"
 REJECT = "Отклонить заявку"
 
+CATEGORY_QUERY = "SELECT id, name AS label FROM categories ORDER BY id"
+CATEGORY_LISTS = {"catalog", "new_product_category", "edit_category"}
+CATEGORY_INPUTS = {"new_category", "rename_category"}
+CATEGORY_RESERVED_LABELS = {HOME, ADMIN, CATALOG, BALANCE, REFERRAL, ORDERS, SUPPORT, PREVIOUS, NEXT}
+
 LISTS = {
-    "catalog": ("Категории", "SELECT id, name AS label FROM categories ORDER BY id", "Категория"),
+    "catalog": ("Категории", CATEGORY_QUERY, "Категория"),
+    "new_product_category": ("Выберите категорию нового товара", CATEGORY_QUERY, "Категория"),
+    "edit_category": ("Выберите категорию для редактирования", CATEGORY_QUERY, "Категория"),
     "products": ("Товары категории", """
         SELECT id, name AS label FROM products WHERE category_id = ? ORDER BY id
     """, "Товар"),
     "my_orders": ("Мои заказы", """
         SELECT id, product AS label FROM orders WHERE buyer = ? ORDER BY id DESC
     """, "Заказ"),
-    "new_product_category": ("Выберите категорию нового товара", """
-        SELECT id, name AS label FROM categories ORDER BY id
-    """, "Категория"),
     "edit_product": ("Выберите товар для редактирования", """
         SELECT products.id, categories.name || ' / ' || products.name AS label FROM products
         JOIN categories ON categories.id = products.category_id ORDER BY products.id
@@ -60,7 +65,8 @@ LISTS = {
 }
 
 ADMIN_SCREENS = {
-    "new_category", "new_product_category", "new_product_name", "new_product_description", "new_product_price",
+    *CATEGORY_INPUTS, "edit_category", "new_product_category",
+    "new_product_name", "new_product_description", "new_product_price",
     "edit_product", "edit_field", "edit_value", "pending_orders", "issue_order", "withdrawals", "resolve_withdrawal",
 }
 
@@ -99,9 +105,10 @@ class Shop:
                              parse_mode=parse_mode,
                              link_preview_options=LinkPreviewOptions(is_disabled=True))
 
-    async def show(self, message, state, screen, text, buttons=(), *, parse_mode=None, **data):
+    async def show(self, message, state, screen, text, buttons=(), *, button_rows=(), parse_mode=None, **data):
         await state.set_data({"screen": screen, **data})
-        await self.say(message, text, [[name] for name in buttons] + [[HOME]], parse_mode=parse_mode)
+        rows = [*button_rows, *([name] for name in buttons), [HOME]]
+        await self.say(message, text, rows, parse_mode=parse_mode)
 
     async def home(self, message, state, text="Выберите раздел в нижнем меню."):
         await state.clear()
@@ -141,17 +148,38 @@ class Shop:
         rows = self.store.all(f"{query} LIMIT ? OFFSET ?", *params, PAGE_SIZE + 1, page * PAGE_SIZE)
         if page and not rows:
             return await self.listing(message, state, screen, *params, page=page - 1)
-        labels = {
-            f"{noun} №{row['id']} · {' '.join(row['label'].split())[:44]}": row["id"]
-            for row in rows[:PAGE_SIZE]
-        }
+        visible = rows[:PAGE_SIZE]
+        columns = 1
+        if screen in CATEGORY_LISTS:
+            columns = 2
+            labels = self.category_labels(visible)
+        else:
+            labels = {
+                f"{noun} №{row['id']} · {' '.join(row['label'].split())[:44]}": row["id"]
+                for row in visible
+            }
+        names = list(labels)
+        button_rows = [names[index:index + columns] for index in range(0, len(names), columns)]
         navigation = {}
         if page:
             navigation[PREVIOUS] = page - 1
         if len(rows) > PAGE_SIZE:
             navigation[NEXT] = page + 1
         await self.show(message, state, screen, title if labels else f"{title}\nЗдесь пока пусто.",
-                        [*labels, *navigation], labels=labels, navigation=navigation, params=list(params))
+                        navigation, button_rows=button_rows, labels=labels, navigation=navigation, params=list(params))
+
+    @staticmethod
+    def category_labels(categories):
+        names = {category["label"] for category in categories}
+        labels = {}
+        for category in categories:
+            label = category["label"]
+            if label in CATEGORY_RESERVED_LABELS:
+                label += " ·"
+                while label in names or label in labels:
+                    label += " ·"
+            labels[label] = category["id"]
+        return labels
 
     def order_message(self, order, admin=False):
         status = "выдан" if order["status"] == "issued" else "ожидает выдачи"
@@ -183,7 +211,7 @@ class Shop:
 
     async def admin(self, message, state, text="Админ-панель"):
         await self.show(message, state, "admin", text,
-                        [ADD_CATEGORY, ADD_PRODUCT, EDIT_PRODUCT, PENDING_ORDERS, WITHDRAWALS])
+                        [ADD_CATEGORY, EDIT_CATEGORY, ADD_PRODUCT, EDIT_PRODUCT, PENDING_ORDERS, WITHDRAWALS])
 
     async def message(self, message, state):
         user = self.store.register(message.from_user.id)
@@ -194,6 +222,8 @@ class Shop:
         try:
             if text == HOME or (screen in ADMIN_SCREENS and not is_admin):
                 await self.home(message, state)
+            elif screen in CATEGORY_INPUTS:
+                await self.admin_input(message, state, screen, data, text)
             elif text == SUPPORT:
                 await self.support(message, state)
             elif text == CATALOG:
@@ -245,6 +275,10 @@ class Shop:
             await self.show(message, state, "receipt", self.order_message(order), [ORDERS])
         elif screen == "new_product_category":
             await self.show(message, state, "new_product_name", "Введите название товара.", category=item)
+        elif screen == "edit_category":
+            category = self.store.one("SELECT name FROM categories WHERE id = ?", item)
+            await self.show(message, state, "rename_category",
+                            f"Категория «{category['name']}». Введите новое название.", item=item)
         elif screen == "pending_orders":
             order = self.store.one("SELECT * FROM orders WHERE id = ?", item)
             buttons = [ISSUE] if order["status"] == "pending" else []
@@ -311,7 +345,7 @@ class Shop:
 
     async def admin_input(self, message, state, screen, data, text):
         if screen == "admin":
-            destinations = {ADD_PRODUCT: "new_product_category", EDIT_PRODUCT: "edit_product",
+            destinations = {EDIT_CATEGORY: "edit_category", ADD_PRODUCT: "new_product_category", EDIT_PRODUCT: "edit_product",
                             PENDING_ORDERS: "pending_orders", WITHDRAWALS: "withdrawals"}
             if text == ADD_CATEGORY:
                 await self.show(message, state, "new_category", "Введите название категории.")
@@ -323,6 +357,10 @@ class Shop:
             self.validate_text(text, 80)
             self.store.update("INSERT INTO categories (name) VALUES (?)", text)
             await self.admin(message, state, "Категория добавлена.")
+        elif screen == "rename_category":
+            self.validate_text(text, 80)
+            self.store.update("UPDATE categories SET name = ? WHERE id = ?", text, data["item"])
+            await self.admin(message, state, "Категория переименована.")
         elif screen == "new_product_name":
             self.validate_text(text, 100)
             await self.show(message, state, "new_product_description", "Введите описание товара.",

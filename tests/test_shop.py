@@ -70,7 +70,7 @@ class ShopTests(unittest.IsolatedAsyncioTestCase):
         await self.chat(8, "Добавить категорию")
         await self.chat(8, "Игры")
         await self.chat(8, "Добавить товар")
-        await self.chat(8, "Категория №1 · Игры")
+        await self.chat(8, "Игры")
         await self.chat(8, "Товар")
         await self.chat(8, "Описание товара")
         await self.chat(8, "50")
@@ -80,7 +80,7 @@ class ShopTests(unittest.IsolatedAsyncioTestCase):
         await self.chat(8, "100")
 
         await self.chat(2, "Каталог")
-        await self.chat(2, "Категория №1 · Игры")
+        await self.chat(2, "Игры")
         await self.chat(2, "Товар №1 · Товар")
         await self.chat(2, "2")
         call = await self.chat(2, "Оплатить с баланса")
@@ -202,7 +202,7 @@ class ShopTests(unittest.IsolatedAsyncioTestCase):
         self.store.update("INSERT INTO categories (name) VALUES ('Игры')")
         self.store.update("INSERT INTO products (category_id, name, description, price) VALUES (1, 'Товар', 'Текст', 10)")
         await self.chat(2, "Каталог")
-        await self.chat(2, "Категория №1 · Игры")
+        await self.chat(2, "Игры")
         await self.chat(2, "Товар №1 · Товар")
         await self.chat(2, "1")
         self.store.update("UPDATE products SET price = 50 WHERE id = 1")
@@ -211,8 +211,28 @@ class ShopTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.store.one("SELECT balance FROM users WHERE id = 2")["balance"], 100)
 
     async def test_admin_actions_are_inaccessible_to_customers(self):
-        for message in ("/start", "Админ-панель", "Добавить категорию", "Фальшивая категория"):
+        for message in ("/start", "Админ-панель", "Добавить категорию", "Редактировать категорию",
+                        "Фальшивая категория"):
             result = await self.chat(2, message)
             self.assertIsInstance(result, SendMessage)
             self.assertNotIn("Админ-панель", [button.text for row in result.reply_markup.keyboard for button in row])
         self.assertFalse(self.store.all("SELECT id FROM categories"))
+
+    async def test_rename_category_and_show_names_in_two_columns(self):
+        for name in ("Игры", "Сервисы", "Подписки"):
+            self.store.update("INSERT INTO categories (name) VALUES (?)", name)
+        self.store.update("INSERT INTO products (category_id, name, description, price) VALUES (1, 'Товар', 'Текст', 10)")
+
+        await self.chat(8, "Админ-панель")
+        await self.chat(8, "Редактировать категорию")
+        await self.chat(8, "Игры")
+        duplicate = await self.chat(8, "Сервисы")
+        self.assertIn("таким названием", duplicate.text)
+        saved = await self.chat(8, "Аккаунты")
+        self.assertEqual(saved.text, "Категория переименована.")
+
+        catalog = await self.chat(2, "Каталог")
+        self.assertEqual([[button.text for button in row] for row in catalog.reply_markup.keyboard],
+                         [["Аккаунты", "Сервисы"], ["Подписки"], ["Главное меню"]])
+        products = await self.chat(2, "Аккаунты")
+        self.assertEqual(products.reply_markup.keyboard[0][0].text, "Товар №1 · Товар")
