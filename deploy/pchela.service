@@ -1,0 +1,24 @@
+[Unit]
+Description=PCHELA Telegram shop
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=simple
+User=pchela
+Group=pchela
+WorkingDirectory=/opt/pchela
+Environment=DATABASE_PATH=/var/lib/pchela/shop.sqlite3
+ExecStart=/opt/pchela/.venv/bin/python -m shop
+Restart=on-failure
+RestartSec=5s
+StateDirectory=pchela
+StateDirectoryMode=0700
+UMask=0077
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=strict
+ProtectHome=yes
+
+[Install]
+WantedBy=multi-user.target
