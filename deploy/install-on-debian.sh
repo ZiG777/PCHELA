@@ -2,6 +2,7 @@
 set -euo pipefail
 
 stage=${1:?Pass the private upload directory}
+resume=${2:-}
 if [[ $EUID -ne 0 || ! $stage =~ ^/tmp/pchela-import\.[a-zA-Z0-9]{8}$ || ! -d $stage ]]; then
     echo 'Run the installer as root with the private upload directory.' >&2
     exit 1
@@ -17,12 +18,18 @@ fi
 app=/opt/pchela
 db=/var/lib/pchela/shop.sqlite3
 unit=/etc/systemd/system/pchela.service
-for path in "$app" "$db" "$unit"; do
+for path in "$app/.env" "$db" "$unit"; do
     if [[ -e $path || -L $path ]]; then
         printf 'Existing deployment file found: %s\n' "$path" >&2
         exit 1
     fi
 done
+if [[ -e $app || -L $app ]]; then
+    if [[ $resume != --resume || -L $app || ! -d $app || ! -f $app/shop/__main__.py || ! -f $app/deploy/pchela.service ]]; then
+        printf 'Existing deployment directory found: %s\n' "$app" >&2
+        exit 1
+    fi
+fi
 
 apt-get update
 DEBIAN_FRONTEND=noninteractive apt-get install -y ca-certificates python3 python3-venv unzip
@@ -37,6 +44,11 @@ source="$source_dir/PCHELA-main"
 test -f "$source/shop/__main__.py"
 test -f "$source/deploy/pchela.service"
 chmod -R u=rwX,go=rX "$source"
+if [[ -d $app ]]; then
+    backup=$(mktemp -d /opt/pchela-interrupted.XXXXXXXX)
+    mv -T "$app" "$backup/app"
+    printf 'Saved the interrupted installation to %s/app\n' "$backup"
+fi
 mv -T "$source" "$app"
 cd "$app"
 python3 -m venv .venv

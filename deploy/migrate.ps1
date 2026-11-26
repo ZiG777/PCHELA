@@ -3,7 +3,8 @@ param(
     [ValidatePattern('^[a-zA-Z_][a-zA-Z0-9_-]*@[a-zA-Z0-9.][a-zA-Z0-9.-]*$')]
     [string]$Server,
     [ValidateRange(1, 65535)]
-    [int]$Port = 22
+    [int]$Port = 22,
+    [switch]$Resume
 )
 
 $ErrorActionPreference = 'Stop'
@@ -80,7 +81,9 @@ try {
     if ($LASTEXITCODE -ne 0) { throw 'Could not transfer the release and SQLite backup.' }
 
     Write-Host '[5/5] Installing and starting PCHELA on Debian.'
-    & $ssh @sshOptions -t -p $Port $Server "if [ `$(id -u) -eq 0 ]; then bash '$remoteStage/install-on-debian.sh' '$remoteStage'; else sudo -- bash '$remoteStage/install-on-debian.sh' '$remoteStage'; fi"
+    $resumeOption = if ($Resume) { ' --resume' } else { '' }
+    $installCommand = "bash '$remoteStage/install-on-debian.sh' '$remoteStage'$resumeOption"
+    & $ssh @sshOptions -t -p $Port $Server "if [ `$(id -u) -eq 0 ]; then $installCommand; else sudo -- $installCommand; fi"
     if ($LASTEXITCODE -ne 0) { throw 'Debian installation failed. See the output above.' }
 } finally {
     $stagedSettings = Join-Path $stage 'shop.env'
