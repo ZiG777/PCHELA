@@ -27,7 +27,8 @@ class Store:
             );
             CREATE TABLE IF NOT EXISTS products (
                 id INTEGER PRIMARY KEY, category_id INTEGER NOT NULL REFERENCES categories(id),
-                name TEXT NOT NULL, description TEXT NOT NULL, price INTEGER NOT NULL CHECK (price > 0)
+                name TEXT NOT NULL, description TEXT NOT NULL, price INTEGER NOT NULL CHECK (price > 0),
+                deleted INTEGER NOT NULL DEFAULT 0
             );
             CREATE TABLE IF NOT EXISTS orders (
                 id INTEGER PRIMARY KEY, buyer INTEGER NOT NULL REFERENCES users(id),
@@ -56,6 +57,9 @@ class Store:
             self.db.execute("INSERT OR IGNORE INTO settings VALUES ('currency', ?)", (currency,))
             if self.one("SELECT value FROM settings WHERE name = 'currency'")["value"] != currency:
                 raise ValueError("Валюта базы отличается от SHOP_CURRENCY. Укажите другую DATABASE_PATH.")
+            columns = {column["name"] for column in self.all("PRAGMA table_info(products)")}
+            if "deleted" not in columns:
+                self.db.execute("ALTER TABLE products ADD COLUMN deleted INTEGER NOT NULL DEFAULT 0")
             self.db.execute("""
                 UPDATE users SET balance = balance + referral_balance, referral_balance = 0
                 WHERE referral_balance > 0
@@ -89,13 +93,28 @@ class Store:
         with self.write():
             return self.db.execute(query, args).lastrowid
 
+    def active_product(self, product_id):
+        product = self.one("SELECT * FROM products WHERE id = ? AND deleted = 0", product_id)
+        if not product:
+            raise ValueError("Товар больше недоступен. Выберите другой товар.")
+        return product
+
+    def update_active_product(self, product_id, field, value):
+        if field not in {"name", "description", "price", "deleted"}:
+            raise ValueError("Неизвестное поле товара.")
+        with self.write():
+            result = self.db.execute(f"UPDATE products SET {field} = ? WHERE id = ? AND deleted = 0",
+                                     (value, product_id))
+            if not result.rowcount:
+                raise ValueError("Товар больше недоступен. Выберите другой товар.")
+
     def purchase(self, buyer, username, quote, admins, notice):
         with self.write():
             prior = self.one("SELECT * FROM orders WHERE purchase_key = ? AND buyer = ?", quote["key"], buyer)
             if prior:
                 return prior
-            product = self.one("SELECT * FROM products WHERE id = ?", quote["product_id"])
-            if not product or any(product[field] != quote[field] for field in ("name", "description", "price")):
+            product = self.active_product(quote["product_id"])
+            if any(product[field] != quote[field] for field in ("name", "description", "price")):
                 raise ValueError("Товар изменился. Выберите его заново в каталоге.")
             quantity = quote["quantity"]
             total = product["price"] * quantity

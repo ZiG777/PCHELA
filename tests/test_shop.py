@@ -1,3 +1,4 @@
+import sqlite3
 import unittest
 from dataclasses import replace
 from pathlib import Path
@@ -290,6 +291,70 @@ class ShopTests(unittest.IsolatedAsyncioTestCase):
         reply = await self.chat(2, "🛒 Оплатить с баланса")
         self.assertIn("Товар изменился", reply.text)
         self.assertEqual(self.store.one("SELECT balance FROM users WHERE id = 2")["balance"], 100)
+
+    async def test_delete_product_keeps_orders_and_blocks_open_quote(self):
+        self.store.register(2)
+        self.store.update("UPDATE users SET balance = 100 WHERE id = 2")
+        self.store.update("INSERT INTO categories (name) VALUES ('Игры')")
+        self.store.update("INSERT INTO products (category_id, name, description, price) VALUES (1, 'Товар', 'Текст', 10)")
+        for confirm_purchase in (True, False):
+            await self.chat(2, "🛍 Каталог")
+            await self.chat(2, "📁 Игры")
+            await self.chat(2, "🛒 Товар")
+            await self.chat(2, "1")
+            if confirm_purchase:
+                await self.chat(2, "🛒 Оплатить с баланса")
+
+        await self.chat(2, "🗑 Подтвердить удаление")
+        self.assertEqual(self.store.active_product(1)["name"], "Товар")
+        await self.chat(8, "🛠 Админ-панель")
+        await self.chat(8, "✏️ Редактировать товар")
+        await self.chat(8, "🛒 Игры / Товар")
+        prompt = await self.chat(8, "🗑 Удалить товар")
+        self.assertIn("<b>Товар</b>", prompt.text)
+        self.assertEqual(prompt.reply_markup.keyboard[0][0].style, "danger")
+        await self.chat(8, "↩️ Отмена")
+        self.assertEqual(self.store.active_product(1)["name"], "Товар")
+
+        await self.chat(8, "🛒 Игры / Товар")
+        await self.chat(8, "🗑 Удалить товар")
+        await self.chat(8, "🗑 Подтвердить удаление")
+        reply = await self.chat(2, "🛒 Оплатить с баланса")
+        self.assertIn("Товар больше недоступен", reply.text)
+        self.assertEqual(self.store.one("SELECT balance FROM users WHERE id = 2")["balance"], 90)
+        self.assertEqual(len(self.store.all("SELECT id FROM orders")), 1)
+
+        await self.chat(2, "🛍 Каталог")
+        catalog = await self.chat(2, "📁 Игры")
+        self.assertIn("Здесь пока пусто", catalog.text)
+        admin_products = await self.chat(8, "✏️ Редактировать товар")
+        self.assertIn("Здесь пока пусто", admin_products.text)
+        await self.chat(8, "🛠 Админ-панель")
+        await self.chat(8, "📦 Заказы к выдаче")
+        await self.chat(8, "📦 Заказ №1 · Товар")
+        await self.chat(8, "✅ Выдано")
+        self.assertEqual(self.store.one("SELECT status FROM orders WHERE id = 1")["status"], "issued")
+
+    def test_existing_products_remain_available_after_schema_upgrade(self):
+        with TemporaryDirectory() as directory:
+            path = Path(directory) / "shop.sqlite3"
+            old = sqlite3.connect(path)
+            try:
+                old.executescript("""
+                    CREATE TABLE products (
+                        id INTEGER PRIMARY KEY, category_id INTEGER NOT NULL,
+                        name TEXT NOT NULL, description TEXT NOT NULL, price INTEGER NOT NULL
+                    );
+                    INSERT INTO products VALUES (1, 1, 'Товар', 'Текст', 10);
+                """)
+            finally:
+                old.close()
+            for _ in range(2):
+                migrated = Store(str(path), "XTR")
+                try:
+                    self.assertEqual(migrated.active_product(1)["name"], "Товар")
+                finally:
+                    migrated.db.close()
 
     async def test_admin_actions_are_inaccessible_to_customers(self):
         for message in ("Админ-панель", "Добавить категорию", "Редактировать категорию",

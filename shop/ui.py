@@ -37,6 +37,9 @@ ADD_CATEGORY = "Добавить категорию"
 EDIT_CATEGORY = "Редактировать категорию"
 ADD_PRODUCT = "Добавить товар"
 EDIT_PRODUCT = "Редактировать товар"
+DELETE_PRODUCT = "Удалить товар"
+CONFIRM_DELETE = "Подтвердить удаление"
+CANCEL = "Отмена"
 PENDING_ORDERS = "Заказы к выдаче"
 WITHDRAWALS = "Старые заявки на вывод"
 TOP_UP = "Пополнить баланс"
@@ -52,6 +55,7 @@ BUTTON_ICONS = {
     HOME: "🏠", ADMIN: "🛠", CATALOG: "🛍", BALANCE: "💰", PROFILE: "👤",
     REFERRAL: "🤝", ORDERS: "📦", SUPPORT: "💬",
     ADD_CATEGORY: "📁", EDIT_CATEGORY: "✏️", ADD_PRODUCT: "➕", EDIT_PRODUCT: "✏️",
+    DELETE_PRODUCT: "🗑", CONFIRM_DELETE: "🗑", CANCEL: "↩️",
     PENDING_ORDERS: "📦", WITHDRAWALS: "📋", TOP_UP: "➕",
     BUY: "🛒", ISSUE: "✅", APPROVE: "✅", REJECT: "❌",
     CRYPTOBOT: "💎", XROCKET: "🚀", STARS: "⭐",
@@ -59,7 +63,8 @@ BUTTON_ICONS = {
 }
 BUTTON_LABELS = {name: f"{icon} {name}" for name, icon in BUTTON_ICONS.items()}
 BUTTON_ACTIONS = {label: name for name, label in BUTTON_LABELS.items()}
-BUTTON_STYLES = {TOP_UP: "primary", BUY: "success", ISSUE: "success", APPROVE: "success", REJECT: "danger"}
+BUTTON_STYLES = {TOP_UP: "primary", BUY: "success", ISSUE: "success", APPROVE: "success", REJECT: "danger",
+                 CONFIRM_DELETE: "danger"}
 
 CATEGORY_QUERY = "SELECT id, name AS label FROM categories ORDER BY id"
 CATEGORY_LISTS = {"catalog", "new_product_category", "edit_category"}
@@ -71,14 +76,14 @@ LISTS = {
     "new_product_category": ("Выберите категорию нового товара", CATEGORY_QUERY, "Категория"),
     "edit_category": ("Выберите категорию для редактирования", CATEGORY_QUERY, "Категория"),
     "products": ("🛒 Товары категории", """
-        SELECT id, name AS label FROM products WHERE category_id = ? ORDER BY id
+        SELECT id, name AS label FROM products WHERE category_id = ? AND deleted = 0 ORDER BY id
     """, "Товар"),
     "my_orders": ("📦 Мои заказы", """
         SELECT id, product AS label FROM orders WHERE buyer = ? ORDER BY id DESC
     """, "Заказ"),
     "edit_product": ("Выберите товар для редактирования", """
         SELECT products.id, categories.name || ' / ' || products.name AS label FROM products
-        JOIN categories ON categories.id = products.category_id ORDER BY products.id
+        JOIN categories ON categories.id = products.category_id WHERE products.deleted = 0 ORDER BY products.id
     """, "Товар"),
     "pending_orders": ("Заказы к выдаче", """
         SELECT id, product AS label FROM orders WHERE status = 'pending' ORDER BY id
@@ -91,7 +96,8 @@ LISTS = {
 ADMIN_SCREENS = {
     *CATEGORY_INPUTS, "edit_category", "new_product_category",
     "new_product_name", "new_product_description", "new_product_price",
-    "edit_product", "edit_field", "edit_value", "pending_orders", "issue_order", "withdrawals", "resolve_withdrawal",
+    "edit_product", "edit_field", "edit_value", "confirm_delete", "pending_orders", "issue_order",
+    "withdrawals", "resolve_withdrawal",
 }
 LIST_ICONS = {"Заказ": "📦", "Заявка": "📋"}
 
@@ -312,7 +318,8 @@ class Shop:
             elif screen in LISTS:
                 await self.choose(message, state, screen, data, text)
             elif screen in ADMIN_SCREENS or (screen == "admin" and is_admin):
-                value = action if screen in {"admin", "edit_field", "issue_order", "resolve_withdrawal"} else text
+                value = action if screen in {"admin", "edit_field", "confirm_delete", "issue_order",
+                                             "resolve_withdrawal"} else text
                 await self.admin_input(message, state, screen, data, value)
             else:
                 value = action if screen in {"balance", "profile", "provider", "purchase"} else text
@@ -336,8 +343,8 @@ class Shop:
             raise ValueError("Выберите пункт в нижнем меню.")
         if screen == "catalog":
             await self.listing(message, state, "products", item)
-        elif screen in {"products", "edit_product"}:
-            product = self.store.one("SELECT * FROM products WHERE id = ?", item)
+        elif screen in PRODUCT_LISTS:
+            product = self.store.active_product(item)
             if screen == "products":
                 await self.show(message, state, "quantity",
                                 f"🛒 <b>{escape(product['name'])}</b>\n\n{escape(product['description'])}\n\n"
@@ -347,7 +354,7 @@ class Shop:
             else:
                 await self.show(message, state, "edit_field",
                                 f"{product['name']}\n{product['description']}\n{self.config.money(product['price'])}",
-                                ["Название", "Описание", "Цена"], item=item)
+                                ["Название", "Описание", "Цена", DELETE_PRODUCT], item=item)
         elif screen == "my_orders":
             order = self.store.one("SELECT * FROM orders WHERE id = ? AND buyer = ?", item, message.from_user.id)
             await self.show(message, state, "receipt", self.order_message(order), [ORDERS], parse_mode="HTML")
@@ -447,6 +454,16 @@ class Shop:
             self.store.update("INSERT INTO products (category_id, name, description, price) VALUES (?, ?, ?, ?)",
                               data["category"], data["name"], data["description"], self.config.parse_amount(text))
             await self.admin(message, state, "Товар добавлен.")
+        elif screen == "edit_field" and text == DELETE_PRODUCT:
+            product = self.store.active_product(data["item"])
+            await self.show(message, state, "confirm_delete",
+                            f"🗑 Удалить товар <b>{escape(product['name'])}</b> из каталога?",
+                            [CONFIRM_DELETE, CANCEL], parse_mode="HTML", item=product["id"])
+        elif screen == "confirm_delete" and text == CONFIRM_DELETE:
+            self.store.update_active_product(data["item"], "deleted", 1)
+            await self.admin(message, state, "Товар удалён из каталога.")
+        elif screen == "confirm_delete" and text == CANCEL:
+            await self.listing(message, state, "edit_product")
         elif screen == "edit_field":
             fields = {"Название": "name", "Описание": "description", "Цена": "price"}
             if text not in fields:
@@ -460,7 +477,7 @@ class Shop:
             else:
                 self.validate_text(text, {"name": 100, "description": 2000}[field])
                 value = text
-            self.store.update(f"UPDATE products SET {field} = ? WHERE id = ?", value, data["item"])
+            self.store.update_active_product(data["item"], field, value)
             await self.admin(message, state, "Товар обновлён.")
         elif screen == "issue_order" and text == ISSUE:
             self.store.complete_order(data["item"])
